@@ -21,6 +21,7 @@ OLX_PASSWORD = os.environ.get("OLX_PASSWORD", "")
 
 LLM_BACKEND = os.environ.get("LLM_BACKEND", "groq").lower()
 STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "json").lower()
+EMBEDDINGS_BACKEND = os.environ.get("EMBEDDINGS_BACKEND", "fastembed").lower()
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///data/olxbot.db")
 USE_QUEUE = os.environ.get("USE_QUEUE", "false").lower() in ("1", "true", "yes")
 
@@ -31,6 +32,18 @@ def build_llm():
         return OllamaAdapter()
     from adapters.llm.groq_adapter import GroqAdapter
     return GroqAdapter()
+
+
+def build_embeddings():
+    """Adaptorul de embeddings pentru potrivirea semantica a FAQ-ului.
+
+    None cand EMBEDDINGS_BACKEND=off — botul foloseste doar potrivirea
+    lexicala (functioneaza, dar prinde mai putine reformulari).
+    """
+    if EMBEDDINGS_BACKEND in ("off", "none", "false", "0"):
+        return None
+    from adapters.embeddings.fastembed_adapter import FastEmbedAdapter
+    return FastEmbedAdapter()
 
 
 def build_storage(account_id: str | None = None):

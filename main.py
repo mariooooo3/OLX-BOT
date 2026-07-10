@@ -63,7 +63,11 @@ def main() -> None:
     account_id, profile_dir, marker = _active_account()
     # datele (produse, conversatii) sunt izolate per cont OLX
     storage = config.build_storage(account_id)
-    handler = MessageHandler(llm=config.build_llm(), storage=storage)
+    handler = MessageHandler(
+        llm=config.build_llm(),
+        storage=storage,
+        embeddings=config.build_embeddings(),
+    )
     browser = BrowserClient(
         email=config.OLX_EMAIL,
         password=config.OLX_PASSWORD,

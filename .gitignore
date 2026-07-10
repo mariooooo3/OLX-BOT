@@ -20,5 +20,9 @@ data/*.db
 *.sqlite
 *.sqlite3
 
+# modelul de embeddings (~220MB, descarcat de setup) + cache-ul de vectori
+data/models/
+data/embeddings_cache.json
+
 # unelte locale specifice acestui calculator (cai absolute, istoric local)
 .claude/settings.local.json

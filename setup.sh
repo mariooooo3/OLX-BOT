@@ -28,23 +28,26 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 if [ ! -f ".venv/bin/python" ]; then
-  echo "[1/5] Creez mediul virtual Python..."
+  echo "[1/6] Creez mediul virtual Python..."
   "$PYTHON" -m venv .venv
 else
-  echo "[1/5] Mediul virtual exista deja, sar peste."
+  echo "[1/6] Mediul virtual exista deja, sar peste."
 fi
 
-echo "[2/5] Instalez pachetele Python..."
+echo "[2/6] Instalez pachetele Python..."
 .venv/bin/python -m pip install --upgrade pip --quiet --disable-pip-version-check
 .venv/bin/python -m pip install -r requirements.txt --quiet --disable-pip-version-check
 
-echo "[3/5] Instalez Chromium pentru Playwright (poate dura cateva minute)..."
+echo "[3/6] Instalez Chromium pentru Playwright (poate dura cateva minute)..."
 .venv/bin/python -m playwright install chromium
 
-echo "[4/5] Instalez interfata web (npm install)..."
+echo "[4/6] Descarc modelul de embeddings pentru FAQ (~220MB, o singura data)..."
+.venv/bin/python -m adapters.embeddings.fastembed_adapter || true
+
+echo "[5/6] Instalez interfata web (npm install)..."
 (cd ui && npm install)
 
-echo "[5/5] Configurez .env..."
+echo "[6/6] Configurez .env..."
 .venv/bin/python setup_env.py
 
 echo

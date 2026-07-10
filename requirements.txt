@@ -4,6 +4,8 @@ python-dotenv
 loguru
 fastapi
 uvicorn[standard]
+# potrivire semantica FAQ (embeddings locale ONNX, fara PyTorch/API extern)
+fastembed
 # MVP2 — stocare pe DB (SQLite acum; Postgres prin schimbarea DATABASE_URL)
 sqlalchemy>=2.0
 requests

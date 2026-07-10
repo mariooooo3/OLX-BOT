@@ -36,7 +36,9 @@ def main() -> None:
         return
 
     llm = config.build_llm()
-    handler = MessageHandler(llm=llm, storage=storage)
+    handler = MessageHandler(
+        llm=llm, storage=storage, embeddings=config.build_embeddings()
+    )
     logger.info("Worker pornit ({} / {}). Astept joburi...",
                 config.LLM_BACKEND, config.STORAGE_BACKEND)
 

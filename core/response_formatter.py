@@ -3,6 +3,8 @@ import re
 
 from loguru import logger
 
+from core.fallback_catalog import category_responses
+
 MAX_LENGTH = 1000
 DASH_PATTERN = re.compile(r"[-\u00ad‐‑‒–—―−]+")
 
@@ -35,13 +37,16 @@ FORBIDDEN_PHRASES = [
 ]
 
 
-def fallback_response(avoid: str | None = None) -> str:
+def fallback_response(avoid: str | None = None, category: str | None = None) -> str:
     """Un raspuns de rezerva aleator.
 
+    Cu `category` (detectata din mesajul cumparatorului), mesajul macar
+    recunoaste subiectul intrebarii — vezi core/fallback_catalog.py.
     Cu `avoid` (ultimul raspuns trimis in conversatie), nu repeta acelasi
     mesaj de doua ori la rand pentru acelasi cumparator.
     """
-    pool = [r for r in FALLBACK_RESPONSES if sanitize_response(r) != avoid] or FALLBACK_RESPONSES
+    responses = category_responses(category) or FALLBACK_RESPONSES
+    pool = [r for r in responses if sanitize_response(r) != avoid] or responses
     return sanitize_response(random.choice(pool))
 
 
@@ -52,19 +57,23 @@ def sanitize_response(response: str) -> str:
     return re.sub(r"\s+([,.;:!?])", r"\1", response)
 
 
-def format_response(raw_response: str, avoid: str | None = None) -> str:
+def format_response(
+    raw_response: str,
+    avoid: str | None = None,
+    category: str | None = None,
+) -> str:
     """Valideaza raspunsul LLM. Returneaza raspunsul curatat sau un fallback."""
     response = sanitize_response(raw_response)
 
     if not response:
         logger.warning("Raspuns gol de la LLM — folosesc fallback.")
-        return fallback_response(avoid)
+        return fallback_response(avoid, category)
 
     if len(response) > MAX_LENGTH:
         logger.warning(
             "Raspuns prea lung ({} caractere) — folosesc fallback.", len(response)
         )
-        return fallback_response(avoid)
+        return fallback_response(avoid, category)
 
     lowered = response.lower()
     for phrase in FORBIDDEN_PHRASES:
@@ -72,6 +81,6 @@ def format_response(raw_response: str, avoid: str | None = None) -> str:
             logger.warning(
                 "Raspunsul contine fraza interzisa '{}' — folosesc fallback.", phrase
             )
-            return fallback_response(avoid)
+            return fallback_response(avoid, category)
 
     return response

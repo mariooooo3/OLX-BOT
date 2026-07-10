@@ -306,7 +306,9 @@ class BotRunner:
             # datele (produse, conversatii) sunt strict ale contului activ
             storage = account_storage(account)
             llm = _build_llm(settings)
-            handler = MessageHandler(llm=llm, storage=storage)
+            handler = MessageHandler(
+                llm=llm, storage=storage, embeddings=config.build_embeddings()
+            )
             use_queue = config.USE_QUEUE and hasattr(storage, "enqueue_job")
             if config.USE_QUEUE and not use_queue:
                 logger.warning(

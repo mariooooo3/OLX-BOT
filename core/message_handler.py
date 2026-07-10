@@ -7,6 +7,8 @@ from loguru import logger
 
 from adapters.llm.base import BaseLLMAdapter
 from adapters.storage.base import BaseStorageAdapter
+from core.fallback_catalog import detect_category
+from core.faq_matcher import FAQMatcher
 from core.product_matcher import match_product
 from core.prompt_builder import build_system_prompt, build_user_prompt
 from core.response_formatter import fallback_response, format_response
@@ -21,8 +23,15 @@ def _normalize_question(text: str) -> str:
 def _availability_response(buyer_message: str, stock: object) -> str | None:
     """Raspuns determinist pentru intrebarile despre disponibilitate."""
     question = _normalize_question(buyer_message)
+    # "cate/cati" singur nu e suficient ("cate viteze are?" e despre produs,
+    # nu despre stoc) — cere si o referinta la stoc/bucati/produse, sau
+    # forma scurta "cate mai ai/aveti"
     quantity_question = bool(
-        re.search(r"\b(?:cate|cati)\b", question)
+        (
+            re.search(r"\b(?:cate|cati)\b", question)
+            and re.search(r"\b(?:stoc|bucat\w*|produs\w*|ramas\w*)\b", question)
+        )
+        or re.fullmatch(r"(?:cate|cati) mai (?:ai|aveti|sunt|este)", question)
         or re.fullmatch(r"ce stoc(?: mai (?:aveti|ai))?", question)
     )
     try:
@@ -58,15 +67,23 @@ def _availability_response(buyer_message: str, stock: object) -> str | None:
 
 
 class MessageHandler:
-    """Orchestreaza fluxul: matching produs -> prompt -> LLM -> validare.
+    """Orchestreaza fluxul: matching produs -> stoc determinist -> FAQ
+    semantic (raspuns direct la potrivire puternica) -> LLM (doar la
+    nevoie) -> validare, cu fallback categorisit cand totul esueaza.
 
     Nu stie nimic de Groq sau JSON — primeste adaptoarele prin constructor,
     deci la MVP2 ramane neschimbat.
     """
 
-    def __init__(self, llm: BaseLLMAdapter, storage: BaseStorageAdapter):
+    def __init__(
+        self,
+        llm: BaseLLMAdapter,
+        storage: BaseStorageAdapter,
+        embeddings=None,
+    ):
         self.llm = llm
         self.storage = storage
+        self.faq_matcher = FAQMatcher(embeddings)
 
     def process(self, message: dict) -> str | None:
         """Proceseaza un mesaj nou si returneaza raspunsul de trimis.
@@ -104,18 +121,36 @@ class MessageHandler:
 
         if product is None:
             logger.warning("Niciun produs potrivit — folosesc fallback.")
-            response = fallback_response(avoid=last_response)
+            response = fallback_response(
+                avoid=last_response,
+                category=detect_category(buyer_message, self.faq_matcher),
+            )
         elif availability is not None:
             response = format_response(availability, avoid=last_response)
         else:
-            system_prompt = build_system_prompt()
-            user_prompt = build_user_prompt(product, buyer_message)
-            try:
-                raw_response = self.llm.generate_reply(system_prompt, user_prompt)
-            except Exception as e:
-                logger.error("Eroare LLM: {} — folosesc fallback.", e)
-                raw_response = ""
-            response = format_response(raw_response, avoid=last_response)
+            faq = self.faq_matcher.best_match(buyer_message, product.get("faq"))
+            if faq is not None and faq.direct:
+                # potrivire puternica: raspunsul scris de vanzator se
+                # trimite ca atare — fara LLM, zero halucinatie
+                logger.info(
+                    "Raspuns direct din FAQ (scor {:.2f}): {!r}",
+                    faq.score, faq.question,
+                )
+                response = format_response(faq.answer, avoid=last_response)
+            else:
+                hint = (faq.question, faq.answer) if faq is not None else None
+                system_prompt = build_system_prompt()
+                user_prompt = build_user_prompt(product, buyer_message, faq_hint=hint)
+                try:
+                    raw_response = self.llm.generate_reply(system_prompt, user_prompt)
+                except Exception as e:
+                    logger.error("Eroare LLM: {} — folosesc fallback.", e)
+                    raw_response = ""
+                response = format_response(
+                    raw_response,
+                    avoid=last_response,
+                    category=detect_category(buyer_message, self.faq_matcher),
+                )
 
         self.storage.log_conversation({
             "id": f"conv_{uuid.uuid4().hex[:8]}",
