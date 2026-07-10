@@ -1,0 +1,11 @@
+playwright
+groq
+python-dotenv
+loguru
+fastapi
+uvicorn[standard]
+# MVP2 — stocare pe DB (SQLite acum; Postgres prin schimbarea DATABASE_URL)
+sqlalchemy>=2.0
+requests
+# necesar DOAR pentru PostgreSQL (decomenteaza cand treci pe Postgres):
+# psycopg[binary]

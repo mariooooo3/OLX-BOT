@@ -1,0 +1,24 @@
+.env
+__pycache__/
+*.pyc
+logs/
+.venv/
+venv/
+
+# date locale/sesiuni — fiecare calculator isi genereaza propriile date
+# la prima rulare (login OLX, produse, conversatii, conturi)
+data/conversations.json
+data/session.json
+data/settings.json
+data/olx_logged_in.json
+data/products.json
+data/accounts.json
+data/accounts/
+data/browser_profile/
+data/browser_profiles/
+data/*.db
+*.sqlite
+*.sqlite3
+
+# unelte locale specifice acestui calculator (cai absolute, istoric local)
+.claude/settings.local.json

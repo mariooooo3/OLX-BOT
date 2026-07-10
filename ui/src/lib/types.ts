@@ -1,0 +1,64 @@
+export interface Product {
+  id: string;
+  title: string;
+  category: string;
+  subcategory: string;
+  price: number;
+  currency: string;
+  stock: number;
+  condition: "nou" | "folosit";
+  description: string;
+  attributes: Record<string, string>;
+  faq: { question: string; answer: string }[];
+  shipping: {
+    available: boolean;
+    courier: string | null;
+    cost_paid_by: "buyer" | "seller" | null;
+    estimated_days: number | null;
+  };
+  keywords: string[];
+}
+
+export interface ConversationMessage {
+  id: string;
+  timestamp: string;
+  buyer_message: string;
+  bot_response: string;
+  status: "sent" | "failed" | "pending";
+}
+
+/** Un fir de conversatie OLX: toate schimburile cu acelasi cumparator
+ *  despre acelasi anunt, in ordine cronologica. */
+export interface ConversationThread {
+  olx_conversation_id: string;
+  /** numele interlocutorului (null pentru intrarile vechi, dinainte sa-l salvam) */
+  buyer_name: string | null;
+  /** titlul anuntului OLX la care se refera conversatia */
+  ad_title: string | null;
+  product_id: string | null;
+  last_timestamp: string;
+  messages: ConversationMessage[];
+}
+
+export interface BotStatus {
+  running: boolean;
+  /** oprire ceruta, botul termina ciclul curent si inchide browserul */
+  stopping: boolean;
+  last_poll: string | null;
+  poll_interval_seconds: number;
+  messages_today: number;
+  errors_today: number;
+  last_error: string | null;
+}
+
+export interface BotError {
+  id: string;
+  timestamp: string;
+  message: string;
+}
+
+export interface Settings {
+  poll_interval_seconds: number;
+  groq_model: string;
+  log_level: "INFO" | "DEBUG";
+}
