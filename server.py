@@ -41,18 +41,28 @@ ACCOUNTS_PATH = Path("data/accounts.json")
 SESSION_MARKER_NAME = "olx_session.json"
 DEFAULT_SETTINGS = {
     "poll_interval_seconds": config.POLL_INTERVAL_SECONDS,
+    # backend-ul + modelul LLM, alese din dashboard (env doar ca implicit)
+    "llm_backend": config.LLM_BACKEND,
     "groq_model": "llama-3.1-8b-instant",
+    "ollama_model": config.OLLAMA_MODEL,
     "log_level": config.LOG_LEVEL,
     "olx_chat_url": "https://www.olx.ro/myaccount/answers/",
 }
 
 def _build_llm(settings: dict):
-    """Construieste LLM-ul respectand modelul din setari (pentru Groq)."""
-    if config.LLM_BACKEND == "ollama":
-        from adapters.llm.ollama_adapter import OllamaAdapter
-        return OllamaAdapter()
-    from adapters.llm.groq_adapter import GroqAdapter
-    return GroqAdapter(model=settings["groq_model"])
+    """Construieste LLM-ul respectand backend-ul si modelul din setari."""
+    return config.build_llm(settings)
+
+
+def _apply_log_level(level: str) -> None:
+    """Reconfigureaza loguru cu nivelul din setari (INFO/DEBUG) — setarea
+    din dashboard se aplica imediat, nu doar la restartul serverului."""
+    if level not in ("INFO", "DEBUG"):
+        level = "INFO"
+    logger.remove()
+    logger.add(sys.stderr, level=level)
+    logger.add("logs/bot.log", level=level,
+               rotation="10 MB", retention="14 days", encoding="utf-8")
 
 
 def load_settings(account: dict | None = None) -> dict:
@@ -749,6 +759,160 @@ def sign_out_olx_account(account_id: str, purge: bool = False):
 # setari
 # --------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------- #
+# modele LLM — Ollama local (live) + Groq online (live, cu fallback)
+# --------------------------------------------------------------------- #
+
+# lista de rezerva cand API-ul Groq nu e accesibil (cheie lipsa/offline)
+GROQ_FALLBACK_MODELS = [
+    {"name": "llama-3.1-8b-instant", "note": "rapid"},
+    {"name": "llama-3.3-70b-versatile", "note": "calitate"},
+]
+# modelele Groq care nu sunt LLM-uri de chat (nu au sens in dropdown)
+_GROQ_EXCLUDE = ("whisper", "tts", "guard", "embedding", "moderation", "orpheus")
+
+# cache scurt ca dashboard-ul sa nu bata API-urile la fiecare afisare
+_models_cache: dict = {"at": 0.0, "data": None}
+MODELS_CACHE_TTL = 60  # secunde
+
+
+def _list_ollama_models() -> dict:
+    """Modelele descarcate local, citite live de la Ollama (/api/tags)."""
+    import requests
+
+    try:
+        resp = requests.get(f"{config.OLLAMA_HOST}/api/tags", timeout=2)
+        resp.raise_for_status()
+        models = [
+            {
+                "name": m["name"],
+                "size_gb": round(m.get("size", 0) / 1e9, 1),
+            }
+            for m in resp.json().get("models", [])
+        ]
+        return {"available": True, "models": models, "host": config.OLLAMA_HOST}
+    except Exception as e:
+        logger.debug("Ollama indisponibil: {}", e)
+        return {"available": False, "models": [], "host": config.OLLAMA_HOST}
+
+
+def _list_groq_models() -> dict:
+    """Modelele de chat Groq, live din API; fallback pe lista hardcodata."""
+    import os
+
+    import requests
+
+    api_key = os.environ.get("GROQ_API_KEY", "")
+    if not api_key:
+        return {"available": False, "models": GROQ_FALLBACK_MODELS}
+    try:
+        resp = requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        names = sorted(
+            m["id"]
+            for m in resp.json().get("data", [])
+            if m.get("active", True)
+            and not any(x in m["id"].lower() for x in _GROQ_EXCLUDE)
+        )
+        return {"available": True, "models": [{"name": n} for n in names]}
+    except Exception as e:
+        logger.debug("API-ul Groq nu a putut fi citit ({}) — lista de rezerva.", e)
+        return {"available": True, "models": GROQ_FALLBACK_MODELS}
+
+
+@app.get("/api/llm/models")
+def get_llm_models(refresh: bool = False):
+    """Modelele selectabile: locale (Ollama, live) + online (Groq)."""
+    now = time.time()
+    if (
+        not refresh
+        and _models_cache["data"] is not None
+        and now - _models_cache["at"] < MODELS_CACHE_TTL
+    ):
+        return _models_cache["data"]
+    data = {"ollama": _list_ollama_models(), "groq": _list_groq_models()}
+    _models_cache.update(at=now, data=data)
+    return data
+
+
+# --------------------------------------------------------------------- #
+# descarcare modele Ollama (pull cu progres)
+# --------------------------------------------------------------------- #
+
+# progresul pull-urilor pornite din dashboard: model -> stare
+_pull_jobs: dict[str, dict] = {}
+_pull_lock = threading.Lock()
+
+
+def _run_ollama_pull(model: str) -> None:
+    """Ruleaza `ollama pull` prin API-ul HTTP, cu progres streaming."""
+    import requests
+
+    job = _pull_jobs[model]
+    try:
+        with requests.post(
+            f"{config.OLLAMA_HOST}/api/pull",
+            json={"model": model, "stream": True},
+            stream=True,
+            timeout=(5, 3600),
+        ) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                update = json.loads(line)
+                if update.get("error"):
+                    raise RuntimeError(update["error"])
+                status = update.get("status", "")
+                total = update.get("total") or 0
+                completed = update.get("completed") or 0
+                with _pull_lock:
+                    job["status"] = status
+                    if total:
+                        job["percent"] = round(completed * 100 / total, 1)
+        with _pull_lock:
+            job.update(done=True, status="success", percent=100.0)
+        _models_cache["data"] = None  # modelul nou sa apara imediat in lista
+        logger.info("Model Ollama descarcat: {}", model)
+    except Exception as e:
+        with _pull_lock:
+            job.update(done=True, error=str(e), status="failed")
+        logger.error("Descarcarea modelului {} a esuat: {}", model, e)
+
+
+@app.post("/api/ollama/pull")
+def start_ollama_pull(body: dict):
+    """Porneste descarcarea unui model Ollama in fundal."""
+    model = str(body.get("model", "")).strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Numele modelului lipseste.")
+    if not _list_ollama_models()["available"]:
+        raise HTTPException(
+            status_code=503,
+            detail="Ollama nu ruleaza. Instaleaza-l de pe ollama.com si porneste-l.",
+        )
+    with _pull_lock:
+        job = _pull_jobs.get(model)
+        if job and not job.get("done"):
+            return {"started": False, "already_running": True}
+        _pull_jobs[model] = {
+            "status": "starting", "percent": 0.0, "done": False, "error": None,
+        }
+    threading.Thread(target=_run_ollama_pull, args=(model,), daemon=True).start()
+    return {"started": True}
+
+
+@app.get("/api/ollama/pull/status")
+def get_ollama_pull_status():
+    """Progresul descarcarilor pornite din dashboard."""
+    with _pull_lock:
+        return {model: dict(job) for model, job in _pull_jobs.items()}
+
+
 @app.get("/api/settings")
 def get_settings():
     return load_settings()
@@ -757,16 +921,17 @@ def get_settings():
 @app.put("/api/settings")
 def put_settings(settings: dict):
     current = load_settings()
+    previous_level = current.get("log_level")
     current.update({k: v for k, v in settings.items() if k in DEFAULT_SETTINGS})
     save_settings(current)
+    if current.get("log_level") != previous_level:
+        _apply_log_level(current["log_level"])
+        logger.info("Nivel log schimbat la {}.", current["log_level"])
     return current
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    logger.remove()
-    logger.add(sys.stderr, level=config.LOG_LEVEL)
-    logger.add("logs/bot.log", level=config.LOG_LEVEL,
-               rotation="10 MB", retention="14 days", encoding="utf-8")
+    _apply_log_level(load_settings().get("log_level", config.LOG_LEVEL))
     uvicorn.run(app, host="127.0.0.1", port=8000)

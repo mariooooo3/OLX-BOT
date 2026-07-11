@@ -1,22 +1,33 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { Download, RefreshCw } from "lucide-react";
 
 import { AppShell, PageHeader } from "@/components/app-shell";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Slider } from "@/components/ui/slider";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { getSettings, saveSettings } from "@/lib/api";
+import {
+  getSettings,
+  saveSettings,
+  getLlmModels,
+  pullOllamaModel,
+  getOllamaPullStatus,
+} from "@/lib/api";
 import type { Settings } from "@/lib/types";
 
 export const Route = createFileRoute("/settings")({
@@ -29,14 +40,64 @@ export const Route = createFileRoute("/settings")({
   component: SettingsPage,
 });
 
+// sugestii pentru descarcare — modele mici, potrivite pe un PC obisnuit
+const SUGGESTED_MODELS = [
+  { name: "llama3.1:8b", note: "echilibrat, ~4.9GB" },
+  { name: "qwen2.5:7b", note: "bun pe română, ~4.7GB" },
+  { name: "mistral:7b", note: "rapid, ~4.4GB" },
+];
+
+/** valoarea compusa a dropdown-ului: "ollama:llama3.1:8b" / "groq:llama..." */
+function modelValue(form: Settings): string {
+  return form.llm_backend === "ollama"
+    ? `ollama:${form.ollama_model}`
+    : `groq:${form.groq_model}`;
+}
+
 function SettingsPage() {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["settings"], queryFn: getSettings });
   const [form, setForm] = useState<Settings | null>(null);
+  const [pullName, setPullName] = useState("");
+  const [pulling, setPulling] = useState(false);
+
+  const models = useQuery({
+    queryKey: ["llmModels"],
+    queryFn: () => getLlmModels(),
+    staleTime: 60_000,
+  });
+
+  // progresul descarcarilor — interogat doar cat timp exista un pull activ
+  const pullStatus = useQuery({
+    queryKey: ["ollamaPull"],
+    queryFn: getOllamaPullStatus,
+    refetchInterval: pulling ? 1500 : false,
+    enabled: pulling,
+  });
 
   useEffect(() => {
     if (q.data) setForm(q.data);
   }, [q.data]);
+
+  const activePulls = useMemo(
+    () =>
+      Object.entries(pullStatus.data ?? {}).filter(([, job]) => !job.done),
+    [pullStatus.data],
+  );
+
+  // cand toate pull-urile s-au terminat: oprim polling-ul si reimprospatam lista
+  useEffect(() => {
+    if (!pulling || !pullStatus.data) return;
+    const jobs = Object.entries(pullStatus.data);
+    if (jobs.length === 0 || jobs.every(([, job]) => job.done)) {
+      setPulling(false);
+      qc.invalidateQueries({ queryKey: ["llmModels"] });
+      for (const [model, job] of jobs) {
+        if (job.error) toast.error(`Descărcarea ${model} a eșuat: ${job.error}`);
+        else toast.success(`Model descărcat: ${model}`);
+      }
+    }
+  }, [pulling, pullStatus.data, qc]);
 
   const save = useMutation({
     mutationFn: (next: Settings) => saveSettings(next),
@@ -48,6 +109,20 @@ function SettingsPage() {
     onError: () => toast.error("Nu am putut salva setările"),
   });
 
+  const startPull = useMutation({
+    mutationFn: (model: string) => pullOllamaModel(model),
+    onSuccess: (res, model) => {
+      if (res.started || res.already_running) {
+        setPulling(true);
+        toast.info(`Descărcare pornită: ${model}`);
+      }
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const ollama = models.data?.ollama;
+  const groq = models.data?.groq;
+
   return (
     <AppShell>
       <PageHeader
@@ -55,7 +130,7 @@ function SettingsPage() {
         description="Configurează comportamentul botului."
       />
 
-      <div className="max-w-2xl">
+      <div className="max-w-2xl space-y-6">
         <Card className="reveal" style={{ "--i": 1 } as React.CSSProperties}>
           <CardHeader>
             <CardTitle className="text-base">Configurare bot</CardTitle>
@@ -85,7 +160,7 @@ function SettingsPage() {
                   <Slider
                     className="mt-3"
                     min={30}
-                    max={120}
+                    max={300}
                     step={5}
                     value={[form.poll_interval_seconds]}
                     onValueChange={([v]) =>
@@ -93,28 +168,86 @@ function SettingsPage() {
                     }
                   />
                   <p className="mt-2 text-xs text-muted-foreground">
-                    Cât de des verifică botul mesaje noi pe OLX.
+                    Cât de des verifică botul mesaje noi pe OLX. Se aplică din
+                    mers, fără repornire.
                   </p>
                 </div>
 
                 <div>
-                  <Label>Model Groq</Label>
+                  <div className="flex items-center justify-between">
+                    <Label>Model AI</Label>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 gap-1 px-2 text-xs text-muted-foreground"
+                      onClick={() => {
+                        qc.invalidateQueries({ queryKey: ["llmModels"] });
+                        models.refetch();
+                      }}
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      Reîmprospătează
+                    </Button>
+                  </div>
                   <Select
-                    value={form.groq_model}
-                    onValueChange={(v) => setForm({ ...form, groq_model: v })}
+                    value={modelValue(form)}
+                    onValueChange={(v) => {
+                      const [backend, ...rest] = v.split(":");
+                      const model = rest.join(":"); // numele Ollama contin ":"
+                      setForm(
+                        backend === "ollama"
+                          ? { ...form, llm_backend: "ollama", ollama_model: model }
+                          : { ...form, llm_backend: "groq", groq_model: model },
+                      );
+                    }}
                   >
                     <SelectTrigger className="mt-2">
-                      <SelectValue />
+                      <SelectValue placeholder="Alege modelul" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="llama-3.1-8b-instant">
-                        llama-3.1-8b-instant (rapid)
-                      </SelectItem>
-                      <SelectItem value="llama-3.3-70b-versatile">
-                        llama-3.3-70b-versatile (calitate)
-                      </SelectItem>
+                      <SelectGroup>
+                        <SelectLabel>Modele locale (Ollama)</SelectLabel>
+                        {models.isLoading ? (
+                          <SelectItem value="_loading" disabled>
+                            Se încarcă…
+                          </SelectItem>
+                        ) : !ollama?.available ? (
+                          <SelectItem value="_no_ollama" disabled>
+                            Ollama nu rulează (instalează de pe ollama.com)
+                          </SelectItem>
+                        ) : ollama.models.length === 0 ? (
+                          <SelectItem value="_no_models" disabled>
+                            Niciun model descărcat încă
+                          </SelectItem>
+                        ) : (
+                          ollama.models.map((m) => (
+                            <SelectItem key={m.name} value={`ollama:${m.name}`}>
+                              {m.name} ({m.size_gb} GB, local)
+                            </SelectItem>
+                          ))
+                        )}
+                      </SelectGroup>
+                      <SelectGroup>
+                        <SelectLabel>Modele online (Groq)</SelectLabel>
+                        {(groq?.models ?? []).map((m) => (
+                          <SelectItem key={m.name} value={`groq:${m.name}`}>
+                            {m.name} (online{m.note ? `, ${m.note}` : ""})
+                          </SelectItem>
+                        ))}
+                        {groq && !groq.available && (
+                          <SelectItem value="_no_groq_key" disabled>
+                            Cheie Groq lipsă în .env — doar modele locale
+                          </SelectItem>
+                        )}
+                      </SelectGroup>
                     </SelectContent>
                   </Select>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Modelele locale rulează pe calculatorul tău prin Ollama
+                    (gratuit, fără internet). Cele online folosesc cheia Groq.
+                    Modelul ales se aplică la următoarea pornire a botului.
+                  </p>
                 </div>
 
                 <div>
@@ -129,10 +262,14 @@ function SettingsPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="INFO">INFO</SelectItem>
-                      <SelectItem value="DEBUG">DEBUG</SelectItem>
+                      <SelectItem value="INFO">INFO (normal)</SelectItem>
+                      <SelectItem value="DEBUG">DEBUG (detaliat, pentru probleme)</SelectItem>
                     </SelectContent>
                   </Select>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Cât de detaliat scrie botul în logs/bot.log. Pune DEBUG doar
+                    când ceva nu merge și vrei să vezi exact ce face botul.
+                  </p>
                 </div>
 
                 <div className="flex justify-end">
@@ -141,6 +278,84 @@ function SettingsPage() {
                   </Button>
                 </div>
               </form>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="reveal" style={{ "--i": 2 } as React.CSSProperties}>
+          <CardHeader>
+            <CardTitle className="text-base">Descarcă model local (Ollama)</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {!ollama?.available ? (
+              <p className="text-sm text-muted-foreground">
+                Ollama nu rulează pe acest calculator. Instalează-l de pe{" "}
+                <a
+                  href="https://ollama.com/download"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline underline-offset-2"
+                >
+                  ollama.com/download
+                </a>
+                , pornește-l, apoi revino aici ca să descarci modele.
+              </p>
+            ) : (
+              <>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="ex. llama3.1:8b"
+                    value={pullName}
+                    onChange={(e) => setPullName(e.target.value)}
+                  />
+                  <Button
+                    type="button"
+                    disabled={!pullName.trim() || startPull.isPending}
+                    onClick={() => startPull.mutate(pullName.trim())}
+                    className="gap-1.5"
+                  >
+                    <Download className="h-4 w-4" />
+                    Descarcă
+                  </Button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {SUGGESTED_MODELS.map((s) => (
+                    <Button
+                      key={s.name}
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => setPullName(s.name)}
+                    >
+                      {s.name} · {s.note}
+                    </Button>
+                  ))}
+                </div>
+                {activePulls.map(([model, job]) => (
+                  <div key={model} className="space-y-1.5">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="font-mono">{model}</span>
+                      <span className="tabular-nums text-muted-foreground">
+                        {job.percent > 0 ? `${job.percent}%` : job.status}
+                      </span>
+                    </div>
+                    <Progress value={job.percent} />
+                  </div>
+                ))}
+                <p className="text-xs text-muted-foreground">
+                  Lista completă de modele:{" "}
+                  <a
+                    href="https://ollama.com/library"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline underline-offset-2"
+                  >
+                    ollama.com/library
+                  </a>
+                  . După descărcare, modelul apare automat la „Model AI".
+                </p>
+              </>
             )}
           </CardContent>
         </Card>

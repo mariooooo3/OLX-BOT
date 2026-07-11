@@ -26,12 +26,20 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///data/olxbot.db")
 USE_QUEUE = os.environ.get("USE_QUEUE", "false").lower() in ("1", "true", "yes")
 
 
-def build_llm():
-    if LLM_BACKEND == "ollama":
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+
+
+def build_llm(settings: dict | None = None):
+    """LLM-ul activ. `settings` (din dashboard) are prioritate peste .env:
+    llm_backend (groq|ollama) + groq_model / ollama_model."""
+    settings = settings or {}
+    backend = (settings.get("llm_backend") or LLM_BACKEND).lower()
+    if backend == "ollama":
         from adapters.llm.ollama_adapter import OllamaAdapter
-        return OllamaAdapter()
+        return OllamaAdapter(model=settings.get("ollama_model") or None)
     from adapters.llm.groq_adapter import GroqAdapter
-    return GroqAdapter()
+    return GroqAdapter(model=settings.get("groq_model") or None)
 
 
 def build_embeddings():

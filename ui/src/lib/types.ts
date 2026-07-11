@@ -59,6 +59,28 @@ export interface BotError {
 
 export interface Settings {
   poll_interval_seconds: number;
+  /** backend-ul LLM activ: modele locale (ollama) sau online (groq) */
+  llm_backend: "groq" | "ollama";
   groq_model: string;
+  ollama_model: string;
   log_level: "INFO" | "DEBUG";
+}
+
+export interface LlmModelsResponse {
+  ollama: {
+    available: boolean;
+    models: { name: string; size_gb: number }[];
+    host: string;
+  };
+  groq: {
+    available: boolean;
+    models: { name: string; note?: string }[];
+  };
+}
+
+export interface PullJob {
+  status: string;
+  percent: number;
+  done: boolean;
+  error: string | null;
 }

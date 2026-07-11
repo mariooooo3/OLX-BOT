@@ -1,4 +1,12 @@
-import type { Product, ConversationThread, BotStatus, BotError, Settings } from "./types";
+import type {
+  Product,
+  ConversationThread,
+  BotStatus,
+  BotError,
+  Settings,
+  LlmModelsResponse,
+  PullJob,
+} from "./types";
 
 // Backend-ul FastAPI al botului (server.py). Configurabil prin VITE_API_URL.
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
@@ -83,6 +91,23 @@ export async function saveSettings(next: Settings): Promise<Settings> {
     method: "PUT",
     body: JSON.stringify(next),
   });
+}
+
+export async function getLlmModels(refresh = false): Promise<LlmModelsResponse> {
+  return request<LlmModelsResponse>(`/api/llm/models${refresh ? "?refresh=true" : ""}`);
+}
+
+export async function pullOllamaModel(
+  model: string,
+): Promise<{ started: boolean; already_running?: boolean }> {
+  return request<{ started: boolean; already_running?: boolean }>("/api/ollama/pull", {
+    method: "POST",
+    body: JSON.stringify({ model }),
+  });
+}
+
+export async function getOllamaPullStatus(): Promise<Record<string, PullJob>> {
+  return request<Record<string, PullJob>>("/api/ollama/pull/status");
 }
 
 export async function getMessagesPerDay(): Promise<{ date: string; count: number }[]> {

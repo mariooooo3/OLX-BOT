@@ -18,19 +18,18 @@ def setup_logging() -> None:
                rotation="10 MB", retention="14 days", encoding="utf-8")
 
 
-def _chat_url(account_id: str | None) -> str:
-    """olx_chat_url din setarile contului (data/accounts/<id>/settings.json),
-    cu fallback pe cele globale (data/settings.json)."""
-    paths = []
+def _settings(account_id: str | None) -> dict:
+    """Setarile efective: globale (data/settings.json) + suprascrierile
+    contului (data/accounts/<id>/settings.json) — aceeasi imbinare ca in
+    dashboard, ca `python main.py` sa respecte ce ai ales acolo."""
+    merged: dict = {}
+    paths = [Path("data/settings.json")]
     if account_id:
         paths.append(Path("data/accounts") / account_id / "settings.json")
-    paths.append(Path("data/settings.json"))
     for settings_path in paths:
         if settings_path.exists():
-            data = json.loads(settings_path.read_text(encoding="utf-8"))
-            if data.get("olx_chat_url"):
-                return data["olx_chat_url"]
-    return "https://www.olx.ro/myaccount/answers/"
+            merged.update(json.loads(settings_path.read_text(encoding="utf-8")))
+    return merged
 
 
 def _active_account() -> tuple[str | None, str, dict]:
@@ -58,13 +57,17 @@ def _active_account() -> tuple[str | None, str, dict]:
 
 def main() -> None:
     setup_logging()
-    logger.info("Pornesc botul OLX (polling la {} sec).", config.POLL_INTERVAL_SECONDS)
-
     account_id, profile_dir, marker = _active_account()
+    settings = _settings(account_id)
+    poll_interval = int(
+        settings.get("poll_interval_seconds") or config.POLL_INTERVAL_SECONDS
+    )
+    logger.info("Pornesc botul OLX (polling la {} sec).", poll_interval)
+
     # datele (produse, conversatii) sunt izolate per cont OLX
     storage = config.build_storage(account_id)
     handler = MessageHandler(
-        llm=config.build_llm(),
+        llm=config.build_llm(settings),
         storage=storage,
         embeddings=config.build_embeddings(),
     )
@@ -72,7 +75,9 @@ def main() -> None:
         email=config.OLX_EMAIL,
         password=config.OLX_PASSWORD,
         profile_dir=profile_dir,
-        chat_url=marker.get("chat_url") or _chat_url(account_id),
+        chat_url=marker.get("chat_url")
+        or settings.get("olx_chat_url")
+        or "https://www.olx.ro/myaccount/answers/",
     )
 
     try:
@@ -101,7 +106,13 @@ def main() -> None:
                         raise
             except Exception as e:
                 logger.error("Eroare in bucla principala: {}", e)
-            sleep(config.POLL_INTERVAL_SECONDS)
+            # recitit la fiecare ciclu — schimbarea din dashboard se aplica
+            # din mers, la fel ca in server.py
+            poll_interval = int(
+                _settings(account_id).get("poll_interval_seconds")
+                or config.POLL_INTERVAL_SECONDS
+            )
+            sleep(poll_interval)
     except KeyboardInterrupt:
         logger.info("Oprire ceruta de utilizator.")
     finally:
