@@ -279,15 +279,21 @@ function SettingsPage() {
                       </SelectGroup>
                       <SelectGroup>
                         <SelectLabel>Modele online (Groq)</SelectLabel>
-                        {(groq?.models ?? []).map((m) => (
-                          <SelectItem key={m.name} value={`groq:${m.name}`}>
-                            {m.name} (online{m.note ? `, ${m.note}` : ""})
+                        {models.isLoading ? (
+                          <SelectItem value="_loading_groq" disabled>
+                            Se încarcă…
                           </SelectItem>
-                        ))}
-                        {groq && !groq.available && (
+                        ) : !groq?.available ? (
                           <SelectItem value="_no_groq_key" disabled>
-                            Cheie Groq lipsă în .env — doar modele locale
+                            Cheie Groq lipsă (gratuită pe console.groq.com, se
+                            pune în .env la GROQ_API_KEY)
                           </SelectItem>
+                        ) : (
+                          groq.models.map((m) => (
+                            <SelectItem key={m.name} value={`groq:${m.name}`}>
+                              {m.name} (online{m.note ? `, ${m.note}` : ""})
+                            </SelectItem>
+                          ))
                         )}
                       </SelectGroup>
                     </SelectContent>

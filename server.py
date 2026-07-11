@@ -828,7 +828,9 @@ def _list_groq_models() -> dict:
 
     api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
-        return {"available": False, "models": GROQ_FALLBACK_MODELS}
+        # fara cheie nu are sens sa oferim modele online — UI-ul arata
+        # hint de configurare (ca la Ollama cand nu ruleaza)
+        return {"available": False, "models": []}
     try:
         resp = requests.get(
             "https://api.groq.com/openai/v1/models",
