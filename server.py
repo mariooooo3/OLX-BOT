@@ -229,6 +229,9 @@ class BotRunner:
         self._stop_event = threading.Event()
         self._start_lock = threading.Lock()
         self.last_poll: str | None = None
+        # modelul cu care ruleaza botul acum ("groq:llama-3.1-8b-instant") —
+        # UI-ul il compara cu setarile salvate ca sa ofere repornirea
+        self.active_llm: str | None = None
         self.last_error: str | None = None
         self.errors_today = 0
         self._errors_date = datetime.now(timezone.utc).date()
@@ -316,6 +319,8 @@ class BotRunner:
             # datele (produse, conversatii) sunt strict ale contului activ
             storage = account_storage(account)
             llm = _build_llm(settings)
+            backend = (settings.get("llm_backend") or config.LLM_BACKEND).lower()
+            self.active_llm = f"{backend}:{getattr(llm, 'model', '?')}"
             handler = MessageHandler(
                 llm=llm, storage=storage, embeddings=config.build_embeddings()
             )
@@ -429,6 +434,7 @@ class BotRunner:
                 interval = load_settings(account)["poll_interval_seconds"]
                 self._stop_event.wait(timeout=interval)
         finally:
+            self.active_llm = None
             browser.stop()
             logger.info("Bot oprit.")
 
@@ -552,6 +558,9 @@ def _bot_status() -> dict:
         "running": runner.running,
         "stopping": runner.stopping,
         "last_poll": runner.last_poll,
+        # modelul cu care ruleaza botul efectiv (None cand e oprit) — UI-ul
+        # il compara cu setarile salvate si ofera repornirea la diferente
+        "active_llm": runner.active_llm if runner.running else None,
         "poll_interval_seconds": load_settings()["poll_interval_seconds"],
         "messages_today": messages_today,
         "errors_today": runner.errors_for_today(),
@@ -596,6 +605,21 @@ def bot_start():
 @app.post("/api/bot/stop")
 def bot_stop():
     runner.stop()
+    return _bot_status()
+
+
+@app.post("/api/bot/restart")
+def bot_restart():
+    """Opreste si reporneste botul — aplica setarile noi (modelul LLM)."""
+    if login_launcher.running:
+        raise HTTPException(
+            status_code=409,
+            detail="Fereastra de login e deschisă — finalizează login-ul întâi.",
+        )
+    if runner.running:
+        runner.stop_and_wait()
+    runner.start()
+    time.sleep(0.5)  # lasa thread-ul sa porneasca sau sa cada imediat
     return _bot_status()
 
 

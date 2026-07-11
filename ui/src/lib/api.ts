@@ -74,6 +74,10 @@ export async function stopBot(): Promise<BotStatus> {
   return request<BotStatus>("/api/bot/stop", { method: "POST" });
 }
 
+export async function restartBot(): Promise<BotStatus> {
+  return request<BotStatus>("/api/bot/restart", { method: "POST" });
+}
+
 export async function getBotErrors(): Promise<BotError[]> {
   return request<BotError[]>("/api/bot/errors");
 }

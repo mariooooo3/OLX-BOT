@@ -45,6 +45,9 @@ export interface BotStatus {
   /** oprire ceruta, botul termina ciclul curent si inchide browserul */
   stopping: boolean;
   last_poll: string | null;
+  /** modelul cu care ruleaza botul acum ("groq:llama-3.1-8b-instant");
+   *  null cand botul e oprit */
+  active_llm: string | null;
   poll_interval_seconds: number;
   messages_today: number;
   errors_today: number;

@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Download, RefreshCw } from "lucide-react";
+import { Download, RefreshCw, RotateCw } from "lucide-react";
 
 import { AppShell, PageHeader } from "@/components/app-shell";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -27,6 +27,8 @@ import {
   getLlmModels,
   pullOllamaModel,
   getOllamaPullStatus,
+  getBotStatus,
+  restartBot,
 } from "@/lib/api";
 import type { Settings } from "@/lib/types";
 
@@ -65,6 +67,12 @@ function SettingsPage() {
     queryKey: ["llmModels"],
     queryFn: () => getLlmModels(),
     staleTime: 60_000,
+  });
+
+  const botStatus = useQuery({
+    queryKey: ["botStatus"],
+    queryFn: getBotStatus,
+    refetchInterval: 10_000,
   });
 
   // progresul descarcarilor — interogat doar cat timp exista un pull activ
@@ -120,6 +128,26 @@ function SettingsPage() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const restart = useMutation({
+    mutationFn: restartBot,
+    onSuccess: (status) => {
+      qc.setQueryData(["botStatus"], status);
+      qc.invalidateQueries({ queryKey: ["botStatus"] });
+      toast.success("Bot repornit cu noile setări");
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  // botul ruleaza cu alt model decat cel salvat -> oferim repornirea
+  const savedModel = q.data ? modelValue(q.data) : null;
+  const needsRestart = Boolean(
+    botStatus.data?.running &&
+      !botStatus.data.stopping &&
+      botStatus.data.active_llm &&
+      savedModel &&
+      botStatus.data.active_llm !== savedModel,
+  );
+
   const ollama = models.data?.ollama;
   const groq = models.data?.groq;
 
@@ -131,6 +159,27 @@ function SettingsPage() {
       />
 
       <div className="max-w-2xl space-y-6">
+        {needsRestart && (
+          <div className="reveal flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3">
+            <p className="text-sm">
+              Botul rulează încă cu modelul{" "}
+              <span className="font-mono font-medium">
+                {botStatus.data?.active_llm?.split(":").slice(1).join(":")}
+              </span>
+              . Repornește-l ca să aplici modelul salvat.
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              className="gap-1.5"
+              disabled={restart.isPending}
+              onClick={() => restart.mutate()}
+            >
+              <RotateCw className={`h-4 w-4 ${restart.isPending ? "animate-spin" : ""}`} />
+              {restart.isPending ? "Se repornește…" : "Repornește botul"}
+            </Button>
+          </div>
+        )}
         <Card className="reveal" style={{ "--i": 1 } as React.CSSProperties}>
           <CardHeader>
             <CardTitle className="text-base">Configurare bot</CardTitle>
@@ -246,7 +295,8 @@ function SettingsPage() {
                   <p className="mt-2 text-xs text-muted-foreground">
                     Modelele locale rulează pe calculatorul tău prin Ollama
                     (gratuit, fără internet). Cele online folosesc cheia Groq.
-                    Modelul ales se aplică la următoarea pornire a botului.
+                    Dacă botul rulează, după salvare apare un buton de
+                    repornire ca modelul nou să se aplice.
                   </p>
                 </div>
 
