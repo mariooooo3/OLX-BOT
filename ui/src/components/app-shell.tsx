@@ -55,7 +55,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               />
             </div>
             <div className="min-w-0">
-              <div className="text-sm font-semibold leading-tight tracking-tight">
+              <div className="font-display text-sm font-bold leading-tight tracking-tight">
                 OLX Bot
               </div>
               <div className="truncate text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
@@ -119,7 +119,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   )}
                 />
               </div>
-              <span className="text-sm font-semibold tracking-tight">OLX Bot</span>
+              <span className="font-display text-sm font-bold tracking-tight">OLX Bot</span>
             </button>
           </AccountMenu>
           <ThemeToggle />
@@ -176,7 +176,7 @@ export function PageHeader({
   return (
     <header className="reveal mb-8 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-4 sm:flex sm:items-center sm:justify-between">
       <div className="min-w-0">
-        <h1 className="truncate text-[1.7rem] font-semibold leading-none tracking-tight">
+        <h1 className="truncate font-display text-[1.85rem] font-bold leading-none tracking-tight">
           {title}
         </h1>
         {description ? (

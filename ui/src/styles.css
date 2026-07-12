@@ -17,6 +17,8 @@
 @theme inline {
   --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono", ui-monospace, "JetBrains Mono", monospace;
+  /* Display: titluri de pagina si branding — caracter, nu doar neutru. */
+  --font-display: "Bricolage Grotesque", "Geist", ui-sans-serif, sans-serif;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -188,6 +190,57 @@
     color: var(--color-foreground);
     font-feature-settings: "ss01", "cv11";
     -webkit-font-smoothing: antialiased;
+    /* Atmosfera: doua pete de lumina teal, abia perceptibile, fixate de
+       viewport — paginile nu mai plutesc pe un fundal plat. */
+    background-image:
+      radial-gradient(
+        52rem 30rem at 82% -8%,
+        oklch(0.62 0.07 195 / 0.075),
+        transparent 68%
+      ),
+      radial-gradient(
+        40rem 26rem at -12% 108%,
+        oklch(0.62 0.06 230 / 0.055),
+        transparent 70%
+      );
+    background-attachment: fixed;
+  }
+
+  .dark body {
+    background-image:
+      radial-gradient(
+        52rem 30rem at 82% -8%,
+        oklch(0.68 0.09 190 / 0.06),
+        transparent 68%
+      ),
+      radial-gradient(
+        40rem 26rem at -12% 108%,
+        oklch(0.6 0.07 250 / 0.05),
+        transparent 70%
+      );
+  }
+
+  ::selection {
+    background: oklch(0.52 0.09 195 / 0.22);
+  }
+
+  /* Scrollbar discret, in ton cu tema. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: oklch(0.6 0.02 230 / 0.35) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: padding-box;
+    background-color: oklch(0.6 0.02 230 / 0.35);
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
   }
 }
 
