@@ -27,8 +27,10 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from loguru import logger
 from playwright.sync_api import BrowserContext, Page, sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from adapters.olx.session_check import dom_logged_in, fetch_me
+from core.faq_matcher import normalize_text
 from core.response_formatter import sanitize_response
 
 BASE_URL = "https://www.olx.ro"
@@ -55,14 +57,33 @@ SELECTORS = {
     # antetul conversatiei deschise: numele interlocutorului + titlul anuntului
     "conversation_user_name": "[data-testid='username']",
     "conversation_ad_title": "[data-testid='context-title'], [data-testid='context-details-title']",
+    # taburile inboxului: "De vandut" (mesaje la anunturile mele) si
+    # "De cumparat" (unde eu sunt cumparatorul). Cel activ are testid
+    # 'tab-active'. Botul trebuie sa raspunda DOAR pe vanzari.
+    "inbox_tab": "[data-testid='tab'], [data-testid='tab-active']",
     "reply_textarea": "textarea[name='message.text'], textarea",
     "send_button": "button[aria-label='Submit message'], button[type='submit']",
+    # OLX tine butonul dezactivat pana cand React inregistreaza text in caseta;
+    # asteptam varianta activa, altfel am da click pe un buton mort
+    "send_button_enabled": (
+        "button[aria-label='Submit message']:not([disabled]), "
+        "button[type='submit']:not([disabled])"
+    ),
 }
 
 CONVERSATION_ID_PREFIX = "conversations-list-item-"
 
 class LoginRequiredError(RuntimeError):
     """Sesiunea OLX lipseste sau a expirat — e nevoie de `python login.py`."""
+
+
+class ConversationClosedError(RuntimeError):
+    """Conversatia nu accepta raspunsuri.
+
+    OLX scoate caseta de raspuns cand interlocutorul si-a sters contul (apare
+    ca "Utilizatorul nu exista") sau cand firul e inchis. Nu e o defectiune a
+    botului si nu are rost reincercata — o sarim si mergem mai departe.
+    """
 
 
 def install_playwright_browsers() -> None:
@@ -262,6 +283,40 @@ class BrowserClient:
         query["my_ads"] = ["1"]
         return parsed._replace(query=urlencode(query, doseq=True)).geturl()
 
+    def _ensure_selling_tab(self) -> bool:
+        """Selecteaza tabul "De vandut" din inbox.
+
+        Parametrul my_ads=1 din URL nu are niciun efect (verificat: lista e
+        identica cu si fara el) — separarea se face doar din taburile paginii.
+        Fara pasul asta, botul citeste orice tab a ramas activ si poate
+        raspunde pe conversatii in care utilizatorul e CUMPARATOR.
+
+        Intoarce True daca tabul de vanzari e activ.
+        """
+        page = self._page
+        try:
+            page.wait_for_selector(SELECTORS["inbox_tab"], timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.warning(
+                "Nu am gasit taburile inboxului — citesc lista asa cum e."
+            )
+            return False
+
+        for tab in page.query_selector_all(SELECTORS["inbox_tab"]):
+            eticheta = normalize_text(tab.inner_text() or "")
+            if "vandut" not in eticheta:
+                continue
+            if tab.get_attribute("data-testid") == "tab-active":
+                logger.debug("Tabul 'De vandut' e deja activ.")
+                return True
+            logger.info("Comut pe tabul 'De vandut' (era pe cumparari).")
+            tab.click()
+            self._human_pause(1.5, 3)
+            return True
+
+        logger.warning("Tabul 'De vandut' nu a fost gasit in inbox.")
+        return False
+
     def _conversation_ids_to_scan(self) -> list[str]:
         """Doar conversatiile marcate NECITITE de OLX, in ordinea din inbox."""
         return self._unread_conversation_ids()
@@ -319,6 +374,8 @@ class BrowserClient:
         page = self._page
         page.goto(self._selling_inbox_url(), wait_until="domcontentloaded")
         self._human_pause(2, 4)
+        # separarea vanzari/cumparari se face din taburi, nu din URL
+        self._ensure_selling_tab()
         try:
             # chatul e un SPA — lista apare dupa incarcarea initiala
             page.wait_for_selector(
@@ -375,15 +432,87 @@ class BrowserClient:
         )
         self._human_pause(1.5, 3)
 
-        page.wait_for_selector(SELECTORS["reply_textarea"], timeout=15000)
-        page.fill(SELECTORS["reply_textarea"], text)
+        box = self._reply_box()
+        self._write_reply(box, text)
 
         # delay random 3-8 sec inainte de trimitere (obligatoriu, comportament uman)
         self._human_pause(3, 8)
 
-        page.click(SELECTORS["send_button"])
+        try:
+            # asteptam ca butonul sa devina ACTIV, nu doar sa existe: OLX il
+            # tine dezactivat cat timp nu inregistreaza text in caseta
+            page.wait_for_selector(SELECTORS["send_button_enabled"], timeout=10000)
+            page.click(SELECTORS["send_button_enabled"])
+        except PlaywrightTimeoutError:
+            # unele variante de chat trimit cu Enter; incercam inainte sa cedam
+            logger.warning("Butonul de trimitere e dezactivat — incerc cu Enter.")
+            box.press("Enter")
+            self._human_pause(1, 2)
+            if self._box_text(box):
+                raise RuntimeError(
+                    f"Nu am putut trimite raspunsul in conversatia "
+                    f"{olx_conversation_id}: butonul de trimitere a ramas "
+                    "dezactivat si Enter nu a golit caseta. Cel mai probabil "
+                    "conversatia nu accepta raspunsuri (anunt inactiv sau cont "
+                    "sters), altfel OLX si-a schimbat interfata de chat."
+                ) from None
         logger.info("Raspuns trimis in conversatia {}.", olx_conversation_id)
         self._human_pause(1, 2)
+
+    def _reply_box(self):
+        """Caseta de raspuns.
+
+        Preferam selectorul specific: cel generic ('textarea') poate nimeri
+        alt camp din pagina, iar atunci am scrie in gol si butonul de
+        trimitere ar ramane dezactivat fara motiv aparent.
+        """
+        page = self._page
+        try:
+            page.wait_for_selector(SELECTORS["reply_textarea"], timeout=15000)
+        except PlaywrightTimeoutError:
+            raise ConversationClosedError(
+                "Conversatia nu are caseta de raspuns — cel mai probabil "
+                "utilizatorul si-a sters contul sau firul e inchis."
+            ) from None
+        specific = page.locator("textarea[name='message.text']")
+        if specific.count():
+            return specific.first
+        logger.debug("Caseta de raspuns gasita doar prin selectorul generic.")
+        return page.locator(SELECTORS["reply_textarea"]).first
+
+    def _write_reply(self, box, text: str) -> None:
+        """Scrie textul in caseta si confirma ca a ajuns acolo.
+
+        Tastam caracter cu caracter (nu page.fill): asa emitem keydown/input
+        ca de la tastatura, ceea ce e si mai aproape de comportamentul uman.
+        Verificam rezultatul si reincercam o data — pagina poate fi inca in
+        curs de hidratare imediat dupa navigare, caz in care primele taste se
+        pierd si caseta ramane goala.
+        """
+        for attempt in (1, 2):
+            box.click()
+            box.press("Control+a")
+            box.press("Backspace")
+            box.press_sequentially(text, delay=random.uniform(25, 55))
+            if self._box_text(box):
+                return
+            logger.warning(
+                "Caseta de raspuns a ramas goala dupa tastare (incercarea {}).",
+                attempt,
+            )
+            self._human_pause(1, 2)
+        raise RuntimeError(
+            "Nu am putut scrie raspunsul in caseta de chat — pagina nu a "
+            "raspuns la tastare."
+        )
+
+    @staticmethod
+    def _box_text(box) -> str:
+        """Textul din caseta; gol inseamna ca mesajul a plecat."""
+        try:
+            return (box.input_value() or "").strip()
+        except Exception:
+            return ""
 
     # ------------------------------------------------------------------ #
     # utilitare
