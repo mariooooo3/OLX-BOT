@@ -39,6 +39,16 @@ STOPWORDS = {
     "prin", "din", "sau", "ati", "pot", "poate", "am", "are", "fi", "cat",
     "cata", "cate", "va", "vă", "imi", "iti", "mi", "ti", "as", "ar", "fie",
     "produs", "produsul", "produse", "anunt", "anuntul",
+    # Politete si formule de deschidere/incheiere: nu spun nimic despre
+    # produs, dar diluau scorul mesajelor scrise frumos ("Buna ziua, as vrea
+    # sa stiu daca pretul este negociabil, multumesc").
+    # NU includem "unde", "cand", "cum" — acelea chiar disting intrebarea.
+    "buna", "bună", "ziua", "seara", "dimineata", "salut", "salutare",
+    "multumesc", "multumim", "merci", "rog", "scuze", "scuzati", "va_rog",
+    "vrea", "vreau", "doresc", "dori", "stiu", "afla", "spune", "spuneti",
+    "interesat", "interesata", "interesa", "putea", "posibil",
+    # conjunctii si particule fara sens propriu in intrebari
+    "daca", "dar", "iar", "deci", "oare", "totusi", "cumva",
 }
 
 
@@ -54,18 +64,34 @@ def _content_tokens(text: str) -> set[str]:
             if t not in STOPWORDS and len(t) > 1}
 
 
+def _covered(source: set[str], target: set[str]) -> int:
+    """Cate cuvinte din `source` se regasesc in `target`, cu potrivire pe
+    radacina (primele 5 litere sau prefix comun), ca 'negocia' sa se
+    potriveasca cu 'negociabil' si 'livrare' cu 'livrezi'."""
+    return sum(
+        1 for x in source
+        if any(x[:5] == y[:5] or x.startswith(y) or y.startswith(x) for y in target)
+    )
+
+
 def lexical_score(a: str, b: str) -> float:
-    """Suprapunerea cuvintelor-continut, cu potrivire pe radacina (primele
-    5 litere sau prefix comun), ca 'negocia' sa se potriveasca cu
-    'negociabil' si 'livrare' cu 'livrezi'."""
+    """Suprapunerea cuvintelor-continut, masurata SIMETRIC (F1).
+
+    Impartirea la minimul lungimilor dadea 1.0 oricarui mesaj scurt care e
+    submultime a intrebarii din FAQ: "care este pretul?" se reduce la
+    {pretul}, complet continut in "pretul este negociabil", si primea scor
+    maxim — desi e alta intrebare. Cu media armonica intre cat acopera
+    mesajul din intrebare si invers, cele doua se separa (1.00 vs 0.67).
+    """
     ta, tb = _content_tokens(a), _content_tokens(b)
     if not ta or not tb:
         return 0.0
-    hits = sum(
-        1 for x in ta
-        if any(x[:5] == y[:5] or x.startswith(y) or y.startswith(x) for y in tb)
-    )
-    return hits / min(len(ta), len(tb))
+    hits_a, hits_b = _covered(ta, tb), _covered(tb, ta)
+    if not hits_a or not hits_b:
+        return 0.0
+    precision = hits_a / len(ta)
+    recall = hits_b / len(tb)
+    return 2 * precision * recall / (precision + recall)
 
 
 def _dot(a: list[float], b: list[float]) -> float:

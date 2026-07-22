@@ -129,10 +129,41 @@ class FAQMatcherTests(unittest.TestCase):
         self.assertEqual(embeddings.calls, calls_first + 1)
 
     def test_lexical_score_matches_word_roots(self):
-        self.assertGreaterEqual(
-            lexical_score("se poate negocia?", "pretul este negociabil?"), 1.0
-        )
+        """'negocia' se potriveste cu 'negociabil' (aceeasi radacina)."""
+        partial = lexical_score("se poate negocia?", "pretul este negociabil?")
+        self.assertGreater(partial, 0.5)
+        # texte fara cuvinte comune raman la zero
         self.assertEqual(lexical_score("buna ziua", "faceti livrare?"), 0.0)
+
+    def test_lexical_score_is_symmetric(self):
+        """Scorul masoara suprapunerea in AMBELE sensuri.
+
+        Cu impartire la minimul lungimilor, un mesaj scurt inclus in
+        intrebarea din FAQ lua scor maxim: "care este pretul?" se reducea la
+        {pretul} si se potrivea perfect cu "pretul este negociabil" — desi
+        intreaba altceva. Botul raspundea "nu, pretul nu este negociabil"
+        cuiva care intrebase cat costa.
+        """
+        intrebare_faq = "pretul este negociabil"
+        potrivire_exacta = lexical_score("pretul este negociabil?", intrebare_faq)
+        alta_intrebare = lexical_score("care este pretul?", intrebare_faq)
+
+        self.assertEqual(potrivire_exacta, 1.0)
+        self.assertLess(alta_intrebare, potrivire_exacta)
+        # si simetric: ordinea argumentelor nu schimba scorul
+        self.assertAlmostEqual(
+            lexical_score("care este pretul?", intrebare_faq),
+            lexical_score(intrebare_faq, "care este pretul?"),
+        )
+
+    def test_politeness_does_not_dilute_match(self):
+        """Un mesaj scris politicos ramane o potrivire buna."""
+        direct = lexical_score("pretul este negociabil?", "pretul este negociabil")
+        politicos = lexical_score(
+            "Buna ziua, as vrea sa stiu daca pretul este negociabil, multumesc",
+            "pretul este negociabil",
+        )
+        self.assertEqual(politicos, direct)
 
 
 class FallbackCategoryTests(unittest.TestCase):
