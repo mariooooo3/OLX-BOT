@@ -20,7 +20,10 @@ class JSONAdapter(BaseStorageAdapter):
 
     def get_products(self) -> list:
         if not self.products_path.exists():
-            logger.warning("Nu exista {} — catalog gol.", self.products_path)
+            # debug, nu warning: cu mai multe conturi, unul cu catalogul inca
+            # gol e o stare normala, nu o problema — altfel umple logul cu
+            # avertismente la fiecare ciclu de polling
+            logger.debug("Nu exista {} — catalog gol.", self.products_path)
             return []
         with open(self.products_path, encoding="utf-8") as f:
             return json.load(f).get("products", [])

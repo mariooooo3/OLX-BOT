@@ -26,12 +26,20 @@ def build_system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
+# Campuri interne care n-au ce cauta in contextul trimis LLM-ului: sunt
+# pentru cautare si contabilitate, nu informatii pentru cumparator. Modelele
+# slabe le scapa in raspuns ("numarul de identificare produsului prod_a0f818"),
+# deci le scoatem din prompt in loc sa ne bazam pe bunavointa modelului.
+INTERNAL_FIELDS = ("id", "keywords", "account_id", "account_label")
+
+
 def build_user_prompt(
     product: dict, buyer_message: str, faq_hint: tuple[str, str] | None = None
 ) -> str:
     """Promptul cu datele produsului; `faq_hint` = (intrebare, raspuns) din
     FAQ cu potrivire semantica medie — evidentiata explicit pentru LLM."""
-    product_json = json.dumps(product, ensure_ascii=False, indent=2)
+    public = {k: v for k, v in product.items() if k not in INTERNAL_FIELDS}
+    product_json = json.dumps(public, ensure_ascii=False, indent=2)
     hint = ""
     if faq_hint:
         hint = FAQ_HINT_TEMPLATE.format(question=faq_hint[0], answer=faq_hint[1])
