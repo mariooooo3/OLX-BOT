@@ -3,11 +3,9 @@ import { LayoutDashboard, MessagesSquare, Package, Settings, Bot } from "lucide-
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ServerStatusBanner } from "@/components/server-status-banner";
-import {
-  AccountMenu,
-  accountDisplayName,
-  useOlxSession,
-} from "@/components/account-menu";
+import { useOlxSession } from "@/components/account-menu";
+import { AccountsPanel } from "@/components/accounts-panel";
+import { AccountScopeSwitcher } from "@/components/account-scope";
 import type { CSSProperties, ReactNode } from "react";
 
 type NavItem = {
@@ -30,16 +28,13 @@ export function AppShell({ children }: { children: ReactNode }) {
     exact ? pathname === to : pathname === to || pathname.startsWith(to + "/");
   const session = useOlxSession().data;
   const olxConnected = session?.connected ?? false;
-  const activeAccountName = session?.account
-    ? accountDisplayName(session.account)
-    : null;
 
   return (
     <div className="min-h-[100dvh] bg-background text-foreground">
       {/* Desktop sidebar */}
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-60 flex-col border-r border-sidebar-border bg-sidebar md:flex">
         {/* click pe logo = meniul de conturi OLX (switch / adauga / sign out) */}
-        <AccountMenu align="start">
+        <AccountsPanel>
           <button
             type="button"
             className="flex w-full items-center gap-3 px-5 py-6 text-left transition-opacity duration-300 hover:opacity-80"
@@ -59,11 +54,15 @@ export function AppShell({ children }: { children: ReactNode }) {
                 OLX Bot
               </div>
               <div className="truncate text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                {activeAccountName ?? "Panou admin"}
+                Panou admin
               </div>
             </div>
           </button>
-        </AccountMenu>
+        </AccountsPanel>
+        {/* Comutatorul de cont: controlul principal, se aplica in toate paginile */}
+        <div className="px-3 pb-3">
+          <AccountScopeSwitcher />
+        </div>
         <nav className="flex-1 space-y-1 px-3 py-2">
           {nav.map((item, index) => {
             const active = isActive(item.to, item.exact);
@@ -108,7 +107,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <ServerStatusBanner />
         {/* Mobile top bar */}
         <div className="sticky top-0 z-20 flex items-center justify-between border-b border-border/70 bg-background/85 px-4 py-3 backdrop-blur-xl md:hidden">
-          <AccountMenu align="start">
+          <AccountsPanel>
             <button type="button" className="flex items-center gap-2">
               <div className="relative grid h-8 w-8 place-items-center rounded-lg bg-primary text-primary-foreground">
                 <Bot className="h-4 w-4" strokeWidth={1.5} />
@@ -121,7 +120,10 @@ export function AppShell({ children }: { children: ReactNode }) {
               </div>
               <span className="font-display text-sm font-bold tracking-tight">OLX Bot</span>
             </button>
-          </AccountMenu>
+          </AccountsPanel>
+          <div className="min-w-0 flex-1 px-2">
+            <AccountScopeSwitcher compact />
+          </div>
           <ThemeToggle />
         </div>
         <main className="mx-auto max-w-7xl px-4 py-6 pb-28 md:px-10 md:py-10 md:pb-12">
@@ -142,9 +144,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 className={cn(
                   "flex flex-col items-center gap-1 py-2.5 text-[11px] font-medium",
                   "transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-95",
-                  active
-                    ? "text-primary"
-                    : "text-muted-foreground hover:text-foreground",
+                  active ? "text-primary" : "text-muted-foreground hover:text-foreground",
                 )}
               >
                 <Icon
@@ -179,9 +179,7 @@ export function PageHeader({
         <h1 className="truncate font-display text-[1.85rem] font-bold leading-none tracking-tight">
           {title}
         </h1>
-        {description ? (
-          <p className="mt-2 text-sm text-muted-foreground">{description}</p>
-        ) : null}
+        {description ? <p className="mt-2 text-sm text-muted-foreground">{description}</p> : null}
       </div>
       {actions ? <div className="shrink-0">{actions}</div> : null}
     </header>

@@ -2,16 +2,11 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import {
-  Cloud,
-  Cpu,
-  Download,
-  ExternalLink,
-  RefreshCw,
-  RotateCw,
-} from "lucide-react";
+import { Cloud, Cpu, Download, ExternalLink, RefreshCw, RotateCw } from "lucide-react";
 
 import { AppShell, PageHeader } from "@/components/app-shell";
+import { scopeLabel } from "@/components/account-scope";
+import { ALL_ACCOUNTS, useAccountScope, useAccounts } from "@/lib/accounts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -44,7 +39,10 @@ export const Route = createFileRoute("/settings")({
   head: () => ({
     meta: [
       { title: "Setări — OLX Bot" },
-      { name: "description", content: "Configurează botul OLX: interval poll, model LLM, log level." },
+      {
+        name: "description",
+        content: "Configurează botul OLX: interval poll, model LLM, log level.",
+      },
     ],
   }),
   component: SettingsPage,
@@ -59,15 +57,24 @@ const SUGGESTED_MODELS = [
 
 /** valoarea compusa a dropdown-ului: "ollama:llama3.1:8b" / "groq:llama..." */
 function modelValue(form: Settings): string {
-  return form.llm_backend === "ollama"
-    ? `ollama:${form.ollama_model}`
-    : `groq:${form.groq_model}`;
+  return form.llm_backend === "ollama" ? `ollama:${form.ollama_model}` : `groq:${form.groq_model}`;
 }
 
 function SettingsPage() {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["settings"], queryFn: getSettings });
+  // acelasi scope ca in restul aplicatiei: editezi setarile unui cont anume
+  // sau, pe "toate conturile", le aplici simultan pe toate
+  const [scope] = useAccountScope();
+  const { accounts } = useAccounts();
+  const q = useQuery({
+    queryKey: ["settings", scope],
+    queryFn: () => getSettings(scope === ALL_ACCOUNTS ? undefined : scope),
+  });
   const [form, setForm] = useState<Settings | null>(null);
+  // valorile incarcate de la server: comparam cu formularul ca sa trimitem
+  // DOAR campurile atinse — altfel salvarea pe toate conturile ar suprascrie
+  // si setarile individuale pe care nu le-ai schimbat
+  const [loaded, setLoaded] = useState<Settings | null>(null);
   const [pullName, setPullName] = useState("");
   const [pulling, setPulling] = useState(false);
 
@@ -79,7 +86,7 @@ function SettingsPage() {
 
   const botStatus = useQuery({
     queryKey: ["botStatus"],
-    queryFn: getBotStatus,
+    queryFn: () => getBotStatus(),
     refetchInterval: 10_000,
   });
 
@@ -92,12 +99,34 @@ function SettingsPage() {
   });
 
   useEffect(() => {
-    if (q.data) setForm(q.data);
+    if (q.data) {
+      setForm(q.data);
+      setLoaded(q.data);
+    }
   }, [q.data]);
 
+  /** campurile efectiv schimbate fata de ce a venit de la server */
+  const changedFields = useMemo(() => {
+    if (!form || !loaded) return [] as (keyof Settings)[];
+    const keys: (keyof Settings)[] = [
+      "poll_interval_seconds",
+      "llm_backend",
+      "groq_model",
+      "ollama_model",
+      "log_level",
+    ];
+    return keys.filter((k) => JSON.stringify(form[k]) !== JSON.stringify(loaded[k]));
+  }, [form, loaded]);
+
+  const mixedFields = new Set(loaded?.mixed ?? []);
+  /** un camp "mixt" ramane mixt cat timp nu l-ai atins in formular */
+  const isMixed = (field: keyof Settings) =>
+    mixedFields.has(field as never) && !changedFields.includes(field);
+  const scopeName = scopeLabel(scope, accounts);
+  const targetCount = scope === ALL_ACCOUNTS ? accounts.length : 1;
+
   const activePulls = useMemo(
-    () =>
-      Object.entries(pullStatus.data ?? {}).filter(([, job]) => !job.done),
+    () => Object.entries(pullStatus.data ?? {}).filter(([, job]) => !job.done),
     [pullStatus.data],
   );
 
@@ -116,11 +145,24 @@ function SettingsPage() {
   }, [pulling, pullStatus.data, qc]);
 
   const save = useMutation({
-    mutationFn: (next: Settings) => saveSettings(next),
+    mutationFn: (next: Settings) => {
+      // trimitem doar ce s-a schimbat, ca restul setarilor sa ramana ale
+      // fiecarui cont in parte
+      const changes: Partial<Settings> = {};
+      for (const key of changedFields) {
+        (changes as Record<string, unknown>)[key] = next[key];
+      }
+      return saveSettings(changes, scope === ALL_ACCOUNTS ? "all" : scope);
+    },
     onSuccess: (data) => {
-      qc.setQueryData(["settings"], data);
+      qc.setQueryData(["settings", scope], data);
+      qc.invalidateQueries({ queryKey: ["settings"] });
       qc.invalidateQueries({ queryKey: ["botStatus"] });
-      toast.success("Setări salvate");
+      toast.success(
+        scope === ALL_ACCOUNTS
+          ? `Setări salvate pe ${accounts.length} conturi`
+          : `Setări salvate pe contul ${scopeName}`,
+      );
     },
     onError: () => toast.error("Nu am putut salva setările"),
   });
@@ -150,10 +192,10 @@ function SettingsPage() {
   const savedModel = q.data ? modelValue(q.data) : null;
   const needsRestart = Boolean(
     botStatus.data?.running &&
-      !botStatus.data.stopping &&
-      botStatus.data.active_llm &&
-      savedModel &&
-      botStatus.data.active_llm !== savedModel,
+    !botStatus.data.stopping &&
+    botStatus.data.active_llm &&
+    savedModel &&
+    botStatus.data.active_llm !== savedModel,
   );
 
   const ollama = models.data?.ollama;
@@ -161,10 +203,7 @@ function SettingsPage() {
 
   return (
     <AppShell>
-      <PageHeader
-        title="Setări"
-        description="Configurează comportamentul botului."
-      />
+      <PageHeader title="Setări" description="Configurează comportamentul botului." />
 
       <div className="grid max-w-5xl gap-6 lg:grid-cols-[minmax(0,1fr)_330px] lg:items-start">
         <div className="space-y-6">
@@ -184,9 +223,7 @@ function SettingsPage() {
                 disabled={restart.isPending}
                 onClick={() => restart.mutate()}
               >
-                <RotateCw
-                  className={`h-4 w-4 ${restart.isPending ? "animate-spin" : ""}`}
-                />
+                <RotateCw className={`h-4 w-4 ${restart.isPending ? "animate-spin" : ""}`} />
                 {restart.isPending ? "Se repornește…" : "Repornește botul"}
               </Button>
             </div>
@@ -211,12 +248,35 @@ function SettingsPage() {
                   }}
                   className="space-y-6"
                 >
+                  {/* pe "toate conturile" spunem clar ce se intampla la salvare:
+                      se scriu doar campurile atinse, restul raman per cont */}
+                  <div className="rounded-xl border border-border/70 bg-muted/40 px-3 py-2.5 text-xs leading-relaxed text-muted-foreground">
+                    {scope === ALL_ACCOUNTS ? (
+                      <>
+                        Editezi{" "}
+                        <strong className="text-foreground">
+                          toate cele {accounts.length} conturi
+                        </strong>{" "}
+                        deodată. Se salvează doar câmpurile pe care le schimbi — restul rămân
+                        diferite de la un cont la altul.
+                      </>
+                    ) : (
+                      <>
+                        Editezi doar contul <strong className="text-foreground">{scopeName}</strong>
+                        . Celelalte conturi nu sunt afectate.
+                      </>
+                    )}
+                  </div>
                   <div>
                     <div className="flex items-center justify-between">
                       <Label>Interval poll</Label>
-                      <span className="font-mono text-sm font-medium tabular-nums">
-                        {form.poll_interval_seconds} sec
-                      </span>
+                      {isMixed("poll_interval_seconds") ? (
+                        <MixedTag />
+                      ) : (
+                        <span className="font-mono text-sm font-medium tabular-nums">
+                          {form.poll_interval_seconds} sec
+                        </span>
+                      )}
                     </div>
                     <Slider
                       className="mt-3"
@@ -224,19 +284,26 @@ function SettingsPage() {
                       max={300}
                       step={5}
                       value={[form.poll_interval_seconds]}
-                      onValueChange={([v]) =>
-                        setForm({ ...form, poll_interval_seconds: v })
-                      }
+                      onValueChange={([v]) => setForm({ ...form, poll_interval_seconds: v })}
                     />
                     <p className="mt-2 text-xs text-muted-foreground">
-                      Cât de des verifică botul mesaje noi pe OLX. Se aplică din
-                      mers, fără repornire.
+                      Cât de des verifică botul mesaje noi pe OLX. Se aplică din mers, fără
+                      repornire.
                     </p>
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between">
-                      <Label>Model AI</Label>
+                      <span className="flex items-center gap-2">
+                        <Label>Model AI</Label>
+                        {/* modelul e cel mai des diferit de la un cont la altul
+                            (unul pe Groq, altul pe Ollama) — marcam explicit */}
+                        {isMixed("groq_model") ||
+                        isMixed("ollama_model") ||
+                        isMixed("llm_backend") ? (
+                          <MixedTag />
+                        ) : null}
+                      </span>
                       <Button
                         type="button"
                         variant="ghost"
@@ -315,15 +382,17 @@ function SettingsPage() {
                       </SelectContent>
                     </Select>
                     <p className="mt-2 text-xs text-muted-foreground">
-                      Modelele locale rulează pe calculatorul tău prin Ollama
-                      (gratuit, fără internet). Cele online folosesc cheia Groq.
-                      Dacă botul rulează, după salvare apare un buton de
-                      repornire ca modelul nou să se aplice.
+                      Modelele locale rulează pe calculatorul tău prin Ollama (gratuit, fără
+                      internet). Cele online folosesc cheia Groq. Dacă botul rulează, după salvare
+                      apare un buton de repornire ca modelul nou să se aplice.
                     </p>
                   </div>
 
                   <div>
-                    <Label>Nivel log</Label>
+                    <span className="flex items-center gap-2">
+                      <Label>Nivel log</Label>
+                      {isMixed("log_level") ? <MixedTag /> : null}
+                    </span>
                     <Select
                       value={form.log_level}
                       onValueChange={(v) =>
@@ -339,14 +408,24 @@ function SettingsPage() {
                       </SelectContent>
                     </Select>
                     <p className="mt-2 text-xs text-muted-foreground">
-                      Cât de detaliat scrie botul în logs/bot.log. Pune DEBUG doar
-                      când ceva nu merge și vrei să vezi exact ce face botul.
+                      Cât de detaliat scrie botul în logs/bot.log. Pune DEBUG doar când ceva nu
+                      merge și vrei să vezi exact ce face botul.
                     </p>
                   </div>
 
                   <div className="flex justify-end">
-                    <Button type="submit" className="press" disabled={save.isPending}>
-                      {save.isPending ? "Se salvează…" : "Salvează setările"}
+                    <Button
+                      type="submit"
+                      className="press"
+                      disabled={save.isPending || changedFields.length === 0}
+                    >
+                      {save.isPending
+                        ? "Se salvează…"
+                        : changedFields.length === 0
+                          ? "Nicio modificare"
+                          : targetCount > 1
+                            ? `Salvează pe ${targetCount} conturi`
+                            : "Salvează setările"}
                     </Button>
                   </div>
                 </form>
@@ -361,9 +440,9 @@ function SettingsPage() {
             <CardContent className="space-y-4">
               {!ollama?.available ? (
                 <p className="text-sm text-muted-foreground">
-                  Ollama nu rulează pe acest calculator — urmează pașii din
-                  panoul <span className="font-medium text-foreground">„Stare medii AI"</span>,
-                  apoi revino aici ca să descarci modele.
+                  Ollama nu rulează pe acest calculator — urmează pașii din panoul{" "}
+                  <span className="font-medium text-foreground">„Stare medii AI"</span>, apoi revino
+                  aici ca să descarci modele.
                 </p>
               ) : (
                 <>
@@ -427,10 +506,7 @@ function SettingsPage() {
         </div>
 
         {/* Panoul din dreapta: starea mediilor AI + pasii de configurare */}
-        <aside
-          className="reveal lg:sticky lg:top-10"
-          style={{ "--i": 3 } as React.CSSProperties}
-        >
+        <aside className="reveal lg:sticky lg:top-10" style={{ "--i": 3 } as React.CSSProperties}>
           <div className="rounded-[1.65rem] bg-foreground/[0.035] p-1.5 ring-1 ring-foreground/[0.06]">
             <div className="rounded-[calc(1.65rem-0.375rem)] bg-card p-5 shadow-[inset_0_1px_1px_oklch(1_0_0/0.7),0_1px_2px_oklch(0.25_0.02_230/0.05)]">
               <div className="text-[10px] font-medium uppercase tracking-[0.2em] text-muted-foreground">
@@ -497,9 +573,8 @@ function SettingsPage() {
               </div>
 
               <p className="mt-5 text-[11px] leading-relaxed text-muted-foreground">
-                Îți ajunge unul singur dintre cele două ca botul să răspundă:
-                Ollama = gratuit, local, fără internet · Groq = online, rapid,
-                cu cheie gratuită.
+                Îți ajunge unul singur dintre cele două ca botul să răspundă: Ollama = gratuit,
+                local, fără internet · Groq = online, rapid, cu cheie gratuită.
               </p>
             </div>
           </div>
@@ -509,13 +584,7 @@ function SettingsPage() {
   );
 }
 
-function ExternalTextLink({
-  href,
-  children,
-}: {
-  href: string;
-  children: React.ReactNode;
-}) {
+function ExternalTextLink({ href, children }: { href: string; children: React.ReactNode }) {
   return (
     <a
       href={href}
@@ -584,9 +653,7 @@ function EnvStatus({
                 ok ? "live-dot bg-emerald-500" : "bg-red-400",
               )}
             />
-            <span className="truncate">
-              {ok ? okText : "Neconfigurat"}
-            </span>
+            <span className="truncate">{ok ? okText : "Neconfigurat"}</span>
           </div>
         </div>
       </div>
@@ -603,12 +670,7 @@ function EnvStatus({
               </li>
             ))}
           </ol>
-          <Button
-            asChild
-            variant="outline"
-            size="sm"
-            className="press h-7 gap-1.5 text-xs"
-          >
+          <Button asChild variant="outline" size="sm" className="press h-7 gap-1.5 text-xs">
             <a href={actionHref} target="_blank" rel="noreferrer">
               {actionLabel}
               <ExternalLink className="h-3 w-3" strokeWidth={1.5} />
@@ -617,5 +679,19 @@ function EnvStatus({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Marcaj pentru un camp care difera intre conturile din scope-ul curent.
+ *
+ * Fara el, pagina ar arata valoarea unui singur cont si prima salvare ar
+ * suprascrie tacit configuratia celorlalte.
+ */
+function MixedTag() {
+  return (
+    <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800 ring-1 ring-inset ring-amber-500/20 dark:bg-amber-500/15 dark:text-amber-300 dark:ring-amber-400/25">
+      valori diferite
+    </span>
   );
 }

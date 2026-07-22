@@ -1,5 +1,8 @@
 export interface Product {
   id: string;
+  /** contul OLX al carui catalog contine produsul (adnotare de la server) */
+  account_id?: string;
+  account_label?: string;
   title: string;
   category: string;
   subcategory: string;
@@ -31,6 +34,9 @@ export interface ConversationMessage {
  *  despre acelasi anunt, in ordine cronologica. */
 export interface ConversationThread {
   olx_conversation_id: string;
+  /** contul OLX pe care a venit conversatia */
+  account_id: string;
+  account_label: string;
   /** numele interlocutorului (null pentru intrarile vechi, dinainte sa-l salvam) */
   buyer_name: string | null;
   /** titlul anuntului OLX la care se refera conversatia */
@@ -40,8 +46,25 @@ export interface ConversationThread {
   messages: ConversationMessage[];
 }
 
-export interface BotStatus {
+/** Starea botului pe un singur cont OLX. Fiecare cont ruleaza independent,
+ *  cu browserul si setarile lui. */
+export interface BotAccountStatus {
+  account_id: string;
+  account_label: string;
+  connected: boolean;
   running: boolean;
+  stopping: boolean;
+  last_poll: string | null;
+  active_llm: string | null;
+  errors_today: number;
+  last_error: string | null;
+}
+
+export interface BotStatus {
+  /** true daca botul ruleaza pe cel putin un cont */
+  running: boolean;
+  accounts_running: number;
+  accounts_connected: number;
   /** oprire ceruta, botul termina ciclul curent si inchide browserul */
   stopping: boolean;
   last_poll: string | null;
@@ -52,12 +75,17 @@ export interface BotStatus {
   messages_today: number;
   errors_today: number;
   last_error: string | null;
+  /** starea fiecarui cont, pentru comutatoarele individuale */
+  accounts: BotAccountStatus[];
 }
 
 export interface BotError {
   id: string;
   timestamp: string;
   message: string;
+  /** contul pe care a aparut eroarea */
+  account_id: string;
+  account_label: string;
 }
 
 export interface Settings {
@@ -67,6 +95,10 @@ export interface Settings {
   groq_model: string;
   ollama_model: string;
   log_level: "INFO" | "DEBUG";
+  /** campurile care difera intre conturile din scope-ul curent — in modul
+   *  "toate conturile" se afiseaza ca "valori diferite" in loc sa arate
+   *  tacit valoarea unui singur cont */
+  mixed?: (keyof Omit<Settings, "mixed">)[];
 }
 
 export interface LlmModelsResponse {

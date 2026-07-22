@@ -40,7 +40,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { StatusBadge } from "@/components/status-badge";
-import { AccountMenu, accountDisplayName, useOlxSession } from "@/components/account-menu";
+import { accountDisplayName, useOlxSession } from "@/components/account-menu";
+import { AccountsPanel } from "@/components/accounts-panel";
 import {
   clearBotErrors,
   getBotErrors,
@@ -49,9 +50,15 @@ import {
   getMessagesPerDay,
   getProducts,
   startBot,
+  startBotAccount,
   startOlxLogin,
   stopBot,
+  stopBotAccount,
 } from "@/lib/api";
+import { Switch } from "@/components/ui/switch";
+import { AccountBadge, AccountDot } from "@/components/account-scope";
+import { ALL_ACCOUNTS, useAccountScope, useAccounts, findAccount } from "@/lib/accounts";
+import type { BotAccountStatus } from "@/lib/types";
 import { timeAgo, truncate, formatDateTime, formatPrice } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -65,17 +72,31 @@ function DashboardPage() {
   const [errorsOpen, setErrorsOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState<"messages" | "products" | "poll" | null>(null);
   const lastAutoOpenedError = useRef<string | null>(null);
+  // scope-ul partajat cu celelalte module: statisticile, graficul si lista de
+  // conversatii recente arata contul ales (implicit: toate conturile)
+  const [scope] = useAccountScope();
+  const { accounts } = useAccounts();
+  const scoped = scope === ALL_ACCOUNTS ? undefined : scope;
   const statusQ = useQuery({
-    queryKey: ["botStatus"],
-    queryFn: getBotStatus,
+    queryKey: ["botStatus", scope],
+    queryFn: () => getBotStatus(scoped),
     // starea botului se schimba pe server (porniri esuate, erori in bucla),
     // asa ca o reimprospatam periodic; in timpul opririi, mai des, ca sa
     // prindem repede momentul in care botul chiar s-a oprit
     refetchInterval: (q) => (q.state.data?.stopping ? 1500 : 5000),
   });
-  const productsQ = useQuery({ queryKey: ["products"], queryFn: getProducts });
-  const convosQ = useQuery({ queryKey: ["conversations"], queryFn: getConversations });
-  const chartQ = useQuery({ queryKey: ["messagesPerDay"], queryFn: getMessagesPerDay });
+  const productsQ = useQuery({
+    queryKey: ["products", scope],
+    queryFn: () => getProducts(scoped),
+  });
+  const convosQ = useQuery({
+    queryKey: ["conversations", scope],
+    queryFn: () => getConversations(scoped),
+  });
+  const chartQ = useQuery({
+    queryKey: ["messagesPerDay", scope],
+    queryFn: () => getMessagesPerDay(scoped),
+  });
   const sessionQ = useOlxSession();
   const errorsQ = useQuery({
     queryKey: ["botErrors"],
@@ -121,8 +142,14 @@ function DashboardPage() {
         // oprirea nu e instantanee: botul termina ciclul curent (navigari,
         // pauze umane) si inchide browserul — poate dura zeci de secunde
         toast.info("Oprire în curs — botul termină ciclul curent…");
+      } else if (status.running) {
+        toast.success(
+          status.accounts_running === 1
+            ? "Bot pornit pe 1 cont"
+            : `Bot pornit pe ${status.accounts_running} conturi`,
+        );
       } else {
-        toast.success(status.running ? "Bot pornit" : "Bot oprit");
+        toast.success("Bot oprit pe toate conturile");
       }
     },
     onError: (e) =>
@@ -209,41 +236,54 @@ function DashboardPage() {
                   />
                   <div>
                     <div className="text-xl font-semibold tracking-tight">
-                      {stopping ? "Se oprește…" : running ? "Bot pornit" : "Bot oprit"}
+                      {stopping
+                        ? "Se oprește…"
+                        : running
+                          ? `Pornit pe ${status.accounts_running} ${
+                              status.accounts_running === 1 ? "cont" : "conturi"
+                            }`
+                          : "Bot oprit"}
                     </div>
                     <div className="font-mono text-xs text-muted-foreground">
                       poll: {status.poll_interval_seconds}s
                     </div>
                   </div>
                 </div>
-                {/* Stare cont OLX + meniu de conturi (switch / adauga / sign out) */}
-                <div className="flex items-center gap-2 rounded-xl border border-border/70 bg-muted/40 px-3 py-2 text-xs">
-                  {olxConnected ? (
-                    <CheckCircle2
-                      className="h-3.5 w-3.5 shrink-0 text-emerald-500"
-                      strokeWidth={1.5}
-                    />
+
+                {/* Conturile OLX, fiecare cu comutatorul lui: botul poate
+                    raspunde pe mai multe conturi in acelasi timp. */}
+                <div className="space-y-1 rounded-xl border border-border/70 bg-muted/40 p-1.5">
+                  {status.accounts.length === 0 ? (
+                    <div className="px-1.5 py-1 text-xs text-muted-foreground">
+                      Niciun cont OLX adăugat.
+                    </div>
                   ) : (
-                    <KeyRound className="h-3.5 w-3.5 shrink-0 text-amber-500" strokeWidth={1.5} />
+                    status.accounts.map((a) => (
+                      <AccountToggleRow
+                        key={a.account_id}
+                        account={a}
+                        color={findAccount(accounts, a.account_id)?.color}
+                      />
+                    ))
                   )}
-                  <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                    {session?.account
-                      ? `${accountDisplayName(session.account)}${olxConnected ? "" : " — neconectat"}`
-                      : "Cont OLX neconectat"}
-                  </span>
-                  <AccountMenu align="end">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 shrink-0 gap-1 rounded-md px-1.5 text-[11px] font-medium text-muted-foreground"
-                    >
-                      Cont
-                      <ChevronDown className="h-3 w-3" strokeWidth={1.5} />
-                    </Button>
-                  </AccountMenu>
+                  <div className="flex items-center justify-between gap-2 border-t border-border/60 px-1.5 pt-1.5">
+                    <span className="truncate text-[11px] text-muted-foreground">
+                      {status.accounts_connected} conectate
+                    </span>
+                    <AccountsPanel>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 shrink-0 gap-1 rounded-md px-1.5 text-[11px] font-medium text-muted-foreground"
+                      >
+                        Gestionează
+                        <ChevronDown className="h-3 w-3" strokeWidth={1.5} />
+                      </Button>
+                    </AccountsPanel>
+                  </div>
                 </div>
 
-                {!olxConnected ? (
+                {status.accounts_connected === 0 ? (
                   <div className="space-y-2.5">
                     <p className="text-xs leading-relaxed text-muted-foreground">
                       OLX cere login manual (CAPTCHA). Apasă butonul, loghează-te o singură dată în
@@ -285,7 +325,13 @@ function DashboardPage() {
                       onClick={() => toggle.mutate()}
                     >
                       <span>
-                        {stopping ? "Se oprește…" : running ? "Oprește botul" : "Pornește botul"}
+                        {stopping
+                          ? "Se oprește…"
+                          : running
+                            ? "Oprește tot"
+                            : status.accounts_connected > 1
+                              ? `Pornește pe ${status.accounts_connected} conturi`
+                              : "Pornește botul"}
                       </span>
                       <span className="grid h-7 w-7 place-items-center rounded-full bg-white/15 transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover:scale-110">
                         {toggle.isPending || stopping ? (
@@ -444,15 +490,21 @@ function DashboardPage() {
                       onClick={() =>
                         navigate({
                           to: "/conversations",
-                          search: { conversation: t.olx_conversation_id },
+                          search: { conversation: `${t.account_id}:${t.olx_conversation_id}` },
                         })
                       }
                       className="group flex w-full items-start gap-3 px-5 py-3.5 text-left transition-colors duration-300 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                       aria-label={`Deschide conversația cu ${t.buyer_name ?? "cumpărătorul"}`}
                     >
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                           <span className="font-mono">{formatDateTime(t.last_timestamp)}</span>
+                          <AccountBadge
+                            account={{
+                              display_name: t.account_label,
+                              color: findAccount(accounts, t.account_id)?.color,
+                            }}
+                          />
                           <span>·</span>
                           <span className="truncate font-medium text-foreground">
                             {t.buyer_name ?? "Cumpărător"}
@@ -536,7 +588,9 @@ function DashboardPage() {
                           setDetailsOpen(null);
                           navigate({
                             to: "/conversations",
-                            search: { conversation: thread.olx_conversation_id },
+                            search: {
+                              conversation: `${thread.account_id}:${thread.olx_conversation_id}`,
+                            },
                           });
                         }}
                         className="group w-full rounded-2xl border border-border/80 bg-muted/25 p-4 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -575,6 +629,7 @@ function DashboardPage() {
                           navigate({
                             to: "/products/$productId",
                             params: { productId: product.id },
+                            search: { account: undefined },
                           });
                         }}
                         className="group h-full w-full rounded-2xl border border-border/80 bg-muted/25 p-4 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -674,8 +729,18 @@ function DashboardPage() {
                     className="rounded-2xl border border-border/80 bg-muted/30 p-4"
                   >
                     <div className="mb-2 flex items-center justify-between gap-3">
-                      <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-red-600 dark:text-red-300">
+                      <span className="min-w-0 font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-red-600 dark:text-red-300">
                         Incident {errorsQ.data.length - index}
+                        {/* cu mai multe conturi active, contul e esential */}
+                        {error.account_label ? (
+                          <AccountBadge
+                            className="ml-2 align-middle"
+                            account={{
+                              display_name: error.account_label,
+                              color: findAccount(accounts, error.account_id)?.color,
+                            }}
+                          />
+                        ) : null}
                       </span>
                       <time className="shrink-0 font-mono text-[11px] text-muted-foreground">
                         {formatDateTime(error.timestamp)}
@@ -723,6 +788,81 @@ function DashboardPage() {
         </DialogContent>
       </Dialog>
     </AppShell>
+  );
+}
+
+/**
+ * Un cont OLX cu comutatorul lui pornit/oprit. Conturile ruleaza independent:
+ * poti lasa unul oprit in timp ce restul raspund la mesaje.
+ */
+function AccountToggleRow({
+  account,
+  color,
+}: {
+  account: BotAccountStatus;
+  color: number | undefined;
+}) {
+  const qc = useQueryClient();
+  const toggle = useMutation({
+    mutationFn: () =>
+      account.running ? stopBotAccount(account.account_id) : startBotAccount(account.account_id),
+    onSuccess: (status) => {
+      qc.setQueryData(["botStatus"], status);
+      const next = status.accounts.find((a) => a.account_id === account.account_id);
+      if (!account.running && next && !next.running) {
+        toast.error(truncate(next.last_error ?? "Contul nu a putut porni", 200));
+      } else if (account.running && next?.stopping) {
+        toast.info(`${account.account_label}: oprire în curs…`);
+      } else {
+        toast.success(`${account.account_label}: ${account.running ? "oprit" : "pornit"}`);
+      }
+    },
+    onError: (e) =>
+      toast.error(
+        e instanceof Error && e.message
+          ? truncate(e.message, 200)
+          : `Nu am putut schimba starea contului ${account.account_label}`,
+      ),
+  });
+
+  return (
+    <div className="flex items-center gap-2 rounded-lg px-1.5 py-1 text-xs">
+      {/* bulina de STARE (verde/gri/rosu) ramane separata de culoarea
+          contului: una spune daca ruleaza, cealalta pe ce cont esti */}
+      <span
+        className={cn(
+          "h-1.5 w-1.5 shrink-0 rounded-full",
+          account.stopping
+            ? "animate-pulse bg-amber-400"
+            : account.running
+              ? "bg-emerald-500"
+              : account.connected
+                ? "bg-zinc-300"
+                : "bg-red-500",
+        )}
+      />
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-1.5">
+          <AccountDot color={color} className="h-1.5 w-1.5" />
+          <span className="truncate">{account.account_label}</span>
+        </span>
+        <span className="block truncate text-[10px] text-muted-foreground">
+          {!account.connected
+            ? "neconectat"
+            : account.stopping
+              ? "se oprește…"
+              : account.running
+                ? `activ · ${timeAgo(account.last_poll)}`
+                : "oprit"}
+        </span>
+      </span>
+      <Switch
+        checked={account.running}
+        disabled={!account.connected || toggle.isPending || account.stopping}
+        onCheckedChange={() => toggle.mutate()}
+        aria-label={`Pornește botul pe contul ${account.account_label}`}
+      />
+    </div>
   );
 }
 

@@ -24,6 +24,8 @@ import {
 import { StatusBadge } from "@/components/status-badge";
 import { EmptyState } from "@/components/empty-state";
 import { getConversations, getProducts } from "@/lib/api";
+import { AccountBadge, accountBorderClass, scopeLabel } from "@/components/account-scope";
+import { ALL_ACCOUNTS, useAccountScope, useAccounts, findAccount } from "@/lib/accounts";
 import type { ConversationThread } from "@/lib/types";
 import { formatDateTime, truncate, formatPrice } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -49,6 +51,12 @@ export function buyerLabel(t: ConversationThread) {
   return t.buyer_name ?? "Cumpărător";
 }
 
+/** Identificatorul unui fir. Include contul: acelasi id de conversatie OLX
+ *  poate exista pe doua conturi diferite. */
+export function threadKey(t: ConversationThread) {
+  return `${t.account_id}:${t.olx_conversation_id}`;
+}
+
 function lastMessage(t: ConversationThread) {
   return t.messages[t.messages.length - 1];
 }
@@ -56,8 +64,16 @@ function lastMessage(t: ConversationThread) {
 function ConversationsPage() {
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
-  const convosQ = useQuery({ queryKey: ["conversations"], queryFn: getConversations });
-  const productsQ = useQuery({ queryKey: ["products"], queryFn: getProducts });
+  // scope-ul e partajat cu celelalte module si tinut minte intre navigari
+  const [scope] = useAccountScope();
+  const { accounts } = useAccounts();
+  // cerem serverului direct conturile din scope: un cont fara mesaje intoarce
+  // o lista goala, ceea ce e un raspuns valid, nu o eroare
+  const convosQ = useQuery({
+    queryKey: ["conversations", scope],
+    queryFn: () => getConversations(scope === ALL_ACCOUNTS ? undefined : scope),
+  });
+  const productsQ = useQuery({ queryKey: ["products"], queryFn: () => getProducts() });
 
   const [status, setStatus] = useState<string>("all");
   const [productId, setProductId] = useState<string>("all");
@@ -90,9 +106,16 @@ function ConversationsPage() {
 
   // firul selectat se ia mereu din datele proaspete, ca sa apara si
   // mesajele sosite dupa deschiderea panoului
+  // acceptam si id-ul simplu al conversatiei (linkuri vechi, dinainte de
+  // conturile multiple), nu doar cheia completa "<cont>:<conversatie>"
   const selected =
-    (convosQ.data ?? []).find((t) => t.olx_conversation_id === search.conversation) ?? null;
+    (convosQ.data ?? []).find(
+      (t) => threadKey(t) === search.conversation || t.olx_conversation_id === search.conversation,
+    ) ?? null;
   const loading = convosQ.isLoading || productsQ.isLoading;
+  const scopeName = scopeLabel(scope, accounts);
+  /** culoarea contului unui fir, pentru bara si eticheta colorata */
+  const colorOf = (t: ConversationThread) => findAccount(accounts, t.account_id)?.color;
   const selectedProduct = selected?.product_id ? productsById.get(selected.product_id) : null;
 
   return (
@@ -152,8 +175,14 @@ function ConversationsPage() {
           ) : filtered.length === 0 ? (
             <EmptyState
               icon={<MessagesSquare className="h-6 w-6" />}
-              title="Nicio conversație găsită"
-              description="Ajustează filtrele sau așteaptă noi mesaje de la cumpărători."
+              title={
+                scopeName ? `Nicio conversație pe contul ${scopeName}` : "Nicio conversație găsită"
+              }
+              description={
+                scopeName
+                  ? `Contul ${scopeName} nu a primit încă mesaje. Alege alt cont sau „Toate conturile”.`
+                  : "Ajustează filtrele sau așteaptă noi mesaje de la cumpărători."
+              }
             />
           ) : (
             <div className="overflow-x-auto">
@@ -161,6 +190,7 @@ function ConversationsPage() {
                 <thead className="border-b border-border bg-muted/40 text-left text-xs uppercase text-muted-foreground">
                   <tr>
                     <th className="px-4 py-3 font-medium">Ultima activitate</th>
+                    <th className="px-4 py-3 font-medium">Cont</th>
                     <th className="px-4 py-3 font-medium">Utilizator</th>
                     <th className="px-4 py-3 font-medium">Anunț</th>
                     <th className="px-4 py-3 font-medium">Ultimul mesaj</th>
@@ -173,19 +203,30 @@ function ConversationsPage() {
                     const last = lastMessage(t);
                     return (
                       <tr
-                        key={t.olx_conversation_id}
+                        key={threadKey(t)}
                         onClick={() =>
                           navigate({
-                            search: { conversation: t.olx_conversation_id },
+                            search: { conversation: threadKey(t) },
                           })
                         }
                         className={cn(
                           "cursor-pointer border-b border-border last:border-0",
                           "transition-colors duration-300 hover:bg-muted/40 active:bg-muted/60",
+                          // bara colorata = contul de pe care vine mesajul;
+                          // nu coloram tot randul, ca sa nu se bata cu statusul
+                          accountBorderClass(colorOf(t)),
                         )}
                       >
                         <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-muted-foreground">
                           {formatDateTime(t.last_timestamp)}
+                        </td>
+                        <td className="px-4 py-3 max-w-[150px]">
+                          <AccountBadge
+                            account={{
+                              display_name: t.account_label,
+                              color: colorOf(t),
+                            }}
+                          />
                         </td>
                         <td className="px-4 py-3 max-w-[160px]">
                           <div className="truncate font-medium">{buyerLabel(t)}</div>
@@ -230,6 +271,15 @@ function ConversationsPage() {
                   <span className="block truncate text-xs font-normal text-muted-foreground">
                     {selected.ad_title}
                   </span>
+                ) : null}
+                {selected ? (
+                  <AccountBadge
+                    className="mt-1"
+                    account={{
+                      display_name: selected.account_label,
+                      color: colorOf(selected),
+                    }}
+                  />
                 ) : null}
               </span>
             </SheetTitle>

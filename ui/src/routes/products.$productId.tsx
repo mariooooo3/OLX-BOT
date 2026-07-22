@@ -23,6 +23,11 @@ import { getProduct, saveProduct } from "@/lib/api";
 import type { Product } from "@/lib/types";
 
 export const Route = createFileRoute("/products/$productId")({
+  // contul pe care se creeaza produsul nou (vine din scope-ul paginii Produse);
+  // la editare nu conteaza — serverul pastreaza contul care detine produsul
+  validateSearch: (search: Record<string, unknown>) => ({
+    account: typeof search.account === "string" ? search.account : undefined,
+  }),
   head: () => ({
     meta: [{ title: "Editare produs — OLX Bot" }],
   }),
@@ -47,6 +52,7 @@ const emptyProduct = (): Product => ({
 
 function ProductEditPage() {
   const { productId } = Route.useParams();
+  const { account: targetAccount } = Route.useSearch();
   const isNew = productId === "new";
   const navigate = useNavigate();
   const qc = useQueryClient();
@@ -78,7 +84,9 @@ function ProductEditPage() {
       const attributes: Record<string, string> = {};
       for (const [k, v] of attrs) if (k.trim()) attributes[k.trim()] = v;
       const payload: Product = { ...form, attributes };
-      return saveProduct(payload);
+      // la creare trimitem contul tinta; la editare il lasam pe server sa
+      // pastreze contul proprietar, ca produsul sa nu migreze intre conturi
+      return saveProduct(payload, isNew ? targetAccount : undefined);
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["products"] });
@@ -156,8 +164,8 @@ function ProductEditPage() {
                 onChange={(e) => setForm({ ...form, title: e.target.value })}
               />
               <p className="mt-1.5 text-xs text-muted-foreground">
-                Folosește exact titlul anunțului de pe OLX — botul asociază
-                automat conversațiile cu produsul după titlu.
+                Folosește exact titlul anunțului de pe OLX — botul asociază automat conversațiile cu
+                produsul după titlu.
               </p>
             </div>
             <div>
@@ -208,9 +216,7 @@ function ProductEditPage() {
               <Label>Condiție</Label>
               <Select
                 value={form.condition}
-                onValueChange={(v) =>
-                  setForm({ ...form, condition: v as Product["condition"] })
-                }
+                onValueChange={(v) => setForm({ ...form, condition: v as Product["condition"] })}
               >
                 <SelectTrigger>
                   <SelectValue />
@@ -293,9 +299,7 @@ function ProductEditPage() {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() =>
-                setForm({ ...form, faq: [...form.faq, { question: "", answer: "" }] })
-              }
+              onClick={() => setForm({ ...form, faq: [...form.faq, { question: "", answer: "" }] })}
             >
               <Plus className="mr-1.5 h-3.5 w-3.5" /> Adaugă
             </Button>
@@ -463,9 +467,7 @@ function ProductEditPage() {
                 value={keywordInput}
                 onChange={(e) => setKeywordInput(e.target.value)}
                 onKeyDown={onKeywordKey}
-                placeholder={
-                  form.keywords.length === 0 ? "Adaugă cuvinte cheie (Enter)" : ""
-                }
+                placeholder={form.keywords.length === 0 ? "Adaugă cuvinte cheie (Enter)" : ""}
                 className="flex-1 min-w-[120px] bg-transparent px-1 py-1 text-sm outline-none"
               />
             </div>

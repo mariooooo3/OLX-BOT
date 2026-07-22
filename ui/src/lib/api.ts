@@ -34,8 +34,8 @@ export async function getHealth(): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>("/api/health");
 }
 
-export async function getProducts(): Promise<Product[]> {
-  return request<Product[]>("/api/products");
+export async function getProducts(accountId?: string): Promise<Product[]> {
+  return request<Product[]>(`/api/products${accountScope(accountId)}`);
 }
 
 export async function getProduct(id: string): Promise<Product | null> {
@@ -47,35 +47,81 @@ export async function getProduct(id: string): Promise<Product | null> {
   }
 }
 
-export async function saveProduct(product: Product): Promise<Product> {
-  return request<Product>("/api/products", {
+/** Salveaza produsul. `accountId` alege contul tinta la creare; la editare,
+ *  serverul pastreaza contul care detine deja produsul. */
+export async function saveProduct(product: Product, accountId?: string): Promise<Product> {
+  return request<Product>(`/api/products${accountScope(accountId)}`, {
     method: "POST",
     body: JSON.stringify(product),
   });
 }
 
-export async function deleteProduct(id: string): Promise<void> {
-  await request(`/api/products/${encodeURIComponent(id)}`, { method: "DELETE" });
+/** Copiaza un produs pe alte conturi. Copiile sunt independente. */
+export async function copyProduct(
+  productId: string,
+  targetAccountIds: string[],
+): Promise<{ count: number }> {
+  return request<{ count: number }>(`/api/products/${encodeURIComponent(productId)}/copy`, {
+    method: "POST",
+    body: JSON.stringify({ target_account_ids: targetAccountIds }),
+  });
 }
 
-export async function getConversations(): Promise<ConversationThread[]> {
-  return request<ConversationThread[]>("/api/conversations");
+export async function deleteProduct(id: string, accountId?: string): Promise<void> {
+  await request(`/api/products/${encodeURIComponent(id)}${accountScope(accountId)}`, {
+    method: "DELETE",
+  });
 }
 
-export async function getBotStatus(): Promise<BotStatus> {
-  return request<BotStatus>("/api/bot/status");
+/**
+ * Firele de conversatie. Implicit aduna toate conturile (botul raspunde pe
+ * toate deodata); `accountId` filtreaza pe unul singur.
+ */
+export async function getConversations(accountId?: string): Promise<ConversationThread[]> {
+  return request<ConversationThread[]>(`/api/conversations${accountScope(accountId)}`);
 }
 
+/** "?account_id=<id>" pentru filtrare, sau "" pentru toate conturile. */
+function accountScope(accountId?: string): string {
+  return accountId && accountId !== "all" ? `?account_id=${encodeURIComponent(accountId)}` : "";
+}
+
+export async function getBotStatus(accountId?: string): Promise<BotStatus> {
+  return request<BotStatus>(`/api/bot/status${accountScope(accountId)}`);
+}
+
+/** Porneste botul pe toate conturile conectate. */
 export async function startBot(): Promise<BotStatus> {
   return request<BotStatus>("/api/bot/start", { method: "POST" });
 }
 
+/** Opreste botul pe toate conturile. */
 export async function stopBot(): Promise<BotStatus> {
   return request<BotStatus>("/api/bot/stop", { method: "POST" });
 }
 
 export async function restartBot(): Promise<BotStatus> {
   return request<BotStatus>("/api/bot/restart", { method: "POST" });
+}
+
+/** Porneste botul pe un singur cont (comutatorul individual). */
+export async function startBotAccount(accountId: string): Promise<BotStatus> {
+  return request<BotStatus>(`/api/bot/accounts/${encodeURIComponent(accountId)}/start`, {
+    method: "POST",
+  });
+}
+
+/** Opreste botul pe un singur cont. */
+export async function stopBotAccount(accountId: string): Promise<BotStatus> {
+  return request<BotStatus>(`/api/bot/accounts/${encodeURIComponent(accountId)}/stop`, {
+    method: "POST",
+  });
+}
+
+export async function restartBotAccount(accountId: string): Promise<BotStatus> {
+  return request<BotStatus>(`/api/bot/accounts/${encodeURIComponent(accountId)}/restart`, {
+    method: "POST",
+  });
 }
 
 export async function getBotErrors(): Promise<BotError[]> {
@@ -86,14 +132,25 @@ export async function clearBotErrors(): Promise<{ cleared: number }> {
   return request<{ cleared: number }>("/api/bot/errors", { method: "DELETE" });
 }
 
-export async function getSettings(): Promise<Settings> {
-  return request<Settings>("/api/settings");
+export async function getSettings(accountId?: string): Promise<Settings> {
+  return request<Settings>(`/api/settings${accountScope(accountId)}`);
 }
 
-export async function saveSettings(next: Settings): Promise<Settings> {
-  return request<Settings>("/api/settings", {
+/**
+ * Scrie setarile. Trimite DOAR campurile schimbate: in modul "toate conturile"
+ * cele netrimise raman diferite de la un cont la altul (fiecare cont isi
+ * pastreaza, de exemplu, modelul LLM propriu).
+ *
+ * `accountId` lipsa = contul selectat; "all" = toate conturile.
+ */
+export async function saveSettings(
+  changes: Partial<Settings>,
+  accountId?: string,
+): Promise<Settings> {
+  const query = accountId ? `?account_id=${encodeURIComponent(accountId)}` : "";
+  return request<Settings>(`/api/settings${query}`, {
     method: "PUT",
-    body: JSON.stringify(next),
+    body: JSON.stringify(changes),
   });
 }
 
@@ -114,13 +171,21 @@ export async function getOllamaPullStatus(): Promise<Record<string, PullJob>> {
   return request<Record<string, PullJob>>("/api/ollama/pull/status");
 }
 
-export async function getMessagesPerDay(): Promise<{ date: string; count: number }[]> {
-  return request<{ date: string; count: number }[]>("/api/stats/messages-per-day");
+export async function getMessagesPerDay(
+  accountId?: string,
+): Promise<{ date: string; count: number }[]> {
+  return request<{ date: string; count: number }[]>(
+    `/api/stats/messages-per-day${accountScope(accountId)}`,
+  );
 }
 
 export interface OlxAccount {
   id: string;
   label: string;
+  /** numele afisat peste tot in UI (numele OLX, altfel eticheta locala) */
+  display_name: string;
+  /** indexul de culoare din paleta, stabil per cont (vezi lib/accounts.ts) */
+  color: number;
   /** emailul contului OLX, detectat la login; null pana la primul login reusit */
   username: string | null;
   /** numele afisat pe OLX (ex. "Mario"); null pana la primul login reusit */
@@ -143,6 +208,16 @@ export async function getOlxSession(): Promise<OlxSession> {
 
 export async function startOlxLogin(): Promise<{ started: boolean }> {
   return request<{ started: boolean }>("/api/olx/login", { method: "POST" });
+}
+
+/** Deschide fereastra de login pentru UN cont anume (reconectare). */
+export async function startOlxLoginForAccount(
+  accountId: string,
+): Promise<{ started: boolean; account_id: string }> {
+  return request<{ started: boolean; account_id: string }>(
+    `/api/olx/accounts/${encodeURIComponent(accountId)}/login`,
+    { method: "POST" },
+  );
 }
 
 export async function addOlxAccount(label?: string): Promise<{ id: string; label: string }> {
