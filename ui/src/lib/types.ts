@@ -1,25 +1,35 @@
+/**
+ * Un produs din catalog.
+ *
+ * Structurat doar ce e faptic si des intrebat (pret, stoc, negociabil, TVA,
+ * garantie) — pentru astea botul raspunde determinist, fara LLM. Restul e un
+ * singur text liber, scris ca un anunt.
+ */
 export interface Product {
   id: string;
   /** contul OLX al carui catalog contine produsul (adnotare de la server) */
   account_id?: string;
   account_label?: string;
   title: string;
-  category: string;
-  subcategory: string;
   price: number;
   currency: string;
   stock: number;
   condition: "nou" | "folosit";
-  description: string;
-  attributes: Record<string, string>;
-  faq: { question: string; answer: string }[];
-  shipping: {
-    available: boolean;
-    courier: string | null;
-    cost_paid_by: "buyer" | "seller" | null;
-    estimated_days: number | null;
+  /** cea mai frecventa intrebare de pe OLX — ca bifa, raspunsul e exact */
+  negotiable: boolean;
+  /** ex. "12 luni", "fara" — gol inseamna "nespecificat" */
+  warranty: string;
+  vat: {
+    /** pretul afisat include deja TVA? */
+    included: boolean;
+    /** se emite factura cu TVA deductibil? */
+    deductible: boolean;
+    /** cota, editabila (implicit cea curenta) */
+    rate: number;
   };
-  keywords: string[];
+  /** descrierea libera: tot ce nu e faptic (specificatii, culoare, stare) */
+  about: string;
+  faq: { question: string; answer: string }[];
 }
 
 export interface ConversationMessage {
@@ -88,8 +98,21 @@ export interface BotError {
   account_label: string;
 }
 
+/** Locatie, livrare si plata — aceleasi pentru toate anunturile contului. */
+export interface SellerInfo {
+  city: string;
+  pickup_available: boolean;
+  delivery_available: boolean;
+  courier: string;
+  delivery_paid_by: "buyer" | "seller";
+  payment_methods: string;
+}
+
 export interface Settings {
   poll_interval_seconds: number;
+  /** completate o data per cont; botul le foloseste si cand niciun produs
+   *  nu se potriveste cu anuntul */
+  seller_info: SellerInfo;
   /** backend-ul LLM activ: modele locale (ollama) sau online (groq) */
   llm_backend: "groq" | "ollama";
   groq_model: string;

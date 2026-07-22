@@ -30,6 +30,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { copyProduct, deleteProduct, getProducts, type OlxAccount } from "@/lib/api";
 import { AccountBadge, accountBorderClass, scopeLabel } from "@/components/account-scope";
+import { SellerInfoCard } from "@/components/seller-info-card";
 import { ALL_ACCOUNTS, useAccountScope, useAccounts, findAccount } from "@/lib/accounts";
 import { accountDisplayName } from "@/components/account-menu";
 import type { Product } from "@/lib/types";
@@ -93,6 +94,10 @@ function ProductsPage() {
         }
       />
 
+      {/* informatiile generale stau deasupra catalogului: se aplica tuturor
+          anunturilor, nu unui produs anume */}
+      <SellerInfoCard />
+
       {productsQ.isLoading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 3 }).map((_, i) => (
@@ -143,7 +148,7 @@ function ProductsPage() {
                       }}
                     />
                     <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                      {p.category} · {p.subcategory}
+                      {p.negotiable ? "Preț negociabil" : "Preț fix"}
                     </div>
                     <h3 className="mt-1 line-clamp-2 text-sm font-semibold leading-snug">
                       {p.title}

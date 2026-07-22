@@ -1,7 +1,7 @@
-import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, type KeyboardEvent } from "react";
-import { ArrowLeft, Plus, Trash2, X } from "lucide-react";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { ArrowLeft, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell, PageHeader } from "@/components/app-shell";
@@ -28,26 +28,21 @@ export const Route = createFileRoute("/products/$productId")({
   validateSearch: (search: Record<string, unknown>) => ({
     account: typeof search.account === "string" ? search.account : undefined,
   }),
-  head: () => ({
-    meta: [{ title: "Editare produs — OLX Bot" }],
-  }),
   component: ProductEditPage,
 });
 
 const emptyProduct = (): Product => ({
   id: "",
   title: "",
-  category: "",
-  subcategory: "",
   price: 0,
   currency: "RON",
   stock: 1,
   condition: "folosit",
-  description: "",
-  attributes: {},
+  negotiable: false,
+  warranty: "",
+  vat: { included: true, deductible: false, rate: 21 },
+  about: "",
   faq: [],
-  shipping: { available: false, courier: null, cost_paid_by: null, estimated_days: null },
-  keywords: [],
 });
 
 function ProductEditPage() {
@@ -64,30 +59,21 @@ function ProductEditPage() {
   });
 
   const [form, setForm] = useState<Product>(emptyProduct());
-  const [attrs, setAttrs] = useState<Array<[string, string]>>([]);
-  const [keywordInput, setKeywordInput] = useState("");
 
   useEffect(() => {
     if (isNew) {
       setForm(emptyProduct());
-      setAttrs([]);
       return;
     }
-    if (q.data) {
-      setForm(q.data);
-      setAttrs(Object.entries(q.data.attributes));
-    }
+    // produsele vechi pot avea campuri lipsa — completam cu valorile implicite
+    if (q.data) setForm({ ...emptyProduct(), ...q.data });
   }, [q.data, isNew]);
 
   const save = useMutation({
-    mutationFn: async () => {
-      const attributes: Record<string, string> = {};
-      for (const [k, v] of attrs) if (k.trim()) attributes[k.trim()] = v;
-      const payload: Product = { ...form, attributes };
+    mutationFn: () =>
       // la creare trimitem contul tinta; la editare il lasam pe server sa
       // pastreze contul proprietar, ca produsul sa nu migreze intre conturi
-      return saveProduct(payload, isNew ? targetAccount : undefined);
-    },
+      saveProduct(form, isNew ? targetAccount : undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["products"] });
       qc.invalidateQueries({ queryKey: ["product", productId] });
@@ -97,93 +83,62 @@ function ProductEditPage() {
     onError: () => toast.error("Nu am putut salva produsul"),
   });
 
+  const set = <K extends keyof Product>(key: K, value: Product[K]) =>
+    setForm((f) => ({ ...f, [key]: value }));
+
+  const setFaq = (index: number, field: "question" | "answer", value: string) =>
+    setForm((f) => {
+      const faq = [...f.faq];
+      faq[index] = { ...faq[index], [field]: value };
+      return { ...f, faq };
+    });
+
   if (!isNew && q.isLoading) {
     return (
       <AppShell>
-        <PageHeader title="Se încarcă…" />
-        <div className="space-y-4">
-          <Skeleton className="h-32 w-full" />
-          <Skeleton className="h-48 w-full" />
-          <Skeleton className="h-48 w-full" />
-        </div>
+        <Skeleton className="h-96 w-full" />
       </AppShell>
     );
   }
 
-  const addKeyword = (k: string) => {
-    const v = k.trim();
-    if (!v || form.keywords.includes(v)) return;
-    setForm({ ...form, keywords: [...form.keywords, v] });
-  };
-  const removeKeyword = (k: string) =>
-    setForm({ ...form, keywords: form.keywords.filter((x) => x !== k) });
-
-  const onKeywordKey = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter" || e.key === ",") {
-      e.preventDefault();
-      addKeyword(keywordInput);
-      setKeywordInput("");
-    } else if (e.key === "Backspace" && !keywordInput && form.keywords.length) {
-      setForm({ ...form, keywords: form.keywords.slice(0, -1) });
-    }
-  };
-
   return (
     <AppShell>
       <PageHeader
-        title={isNew ? "Adaugă produs" : "Editează produs"}
-        description={isNew ? "Completează detaliile pentru un produs nou." : form.title}
+        title={isNew ? "Produs nou" : form.title || "Editează produsul"}
+        description="Botul răspunde exact din câmpurile de mai jos."
         actions={
-          <Button variant="outline" asChild>
-            <Link to="/products">
-              <ArrowLeft className="mr-2 h-4 w-4" /> Înapoi
-            </Link>
+          <Button variant="outline" onClick={() => navigate({ to: "/products" })}>
+            <ArrowLeft className="mr-2 h-4 w-4" /> Înapoi
           </Button>
         }
       />
 
       <form
+        className="grid max-w-3xl gap-6"
         onSubmit={(e) => {
           e.preventDefault();
           save.mutate();
         }}
-        className="space-y-4"
       >
-        {/* Date generale */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Date generale</CardTitle>
+            <CardTitle className="text-base">Date de bază</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
             <div className="sm:col-span-2">
               <Label htmlFor="title">Titlu</Label>
+              <p className="mb-1.5 text-xs text-muted-foreground">
+                Trebuie să fie același cu titlul anunțului de pe OLX — după el recunoaște botul
+                despre ce produs e conversația.
+              </p>
               <Input
                 id="title"
-                required
                 value={form.title}
-                onChange={(e) => setForm({ ...form, title: e.target.value })}
-              />
-              <p className="mt-1.5 text-xs text-muted-foreground">
-                Folosește exact titlul anunțului de pe OLX — botul asociază automat conversațiile cu
-                produsul după titlu.
-              </p>
-            </div>
-            <div>
-              <Label htmlFor="category">Categorie</Label>
-              <Input
-                id="category"
-                value={form.category}
-                onChange={(e) => setForm({ ...form, category: e.target.value })}
+                onChange={(e) => set("title", e.target.value)}
+                required
               />
             </div>
-            <div>
-              <Label htmlFor="subcategory">Subcategorie</Label>
-              <Input
-                id="subcategory"
-                value={form.subcategory}
-                onChange={(e) => setForm({ ...form, subcategory: e.target.value })}
-              />
-            </div>
+
             <div>
               <Label htmlFor="price">Preț</Label>
               <Input
@@ -191,7 +146,7 @@ function ProductEditPage() {
                 type="number"
                 min={0}
                 value={form.price}
-                onChange={(e) => setForm({ ...form, price: Number(e.target.value) })}
+                onChange={(e) => set("price", Number(e.target.value))}
               />
             </div>
             <div>
@@ -199,9 +154,10 @@ function ProductEditPage() {
               <Input
                 id="currency"
                 value={form.currency}
-                onChange={(e) => setForm({ ...form, currency: e.target.value })}
+                onChange={(e) => set("currency", e.target.value)}
               />
             </div>
+
             <div>
               <Label htmlFor="stock">Stoc</Label>
               <Input
@@ -209,14 +165,14 @@ function ProductEditPage() {
                 type="number"
                 min={0}
                 value={form.stock}
-                onChange={(e) => setForm({ ...form, stock: Number(e.target.value) })}
+                onChange={(e) => set("stock", Number(e.target.value))}
               />
             </div>
             <div>
-              <Label>Condiție</Label>
+              <Label>Stare</Label>
               <Select
                 value={form.condition}
-                onValueChange={(v) => setForm({ ...form, condition: v as Product["condition"] })}
+                onValueChange={(v) => set("condition", v as Product["condition"])}
               >
                 <SelectTrigger>
                   <SelectValue />
@@ -227,262 +183,150 @@ function ProductEditPage() {
                 </SelectContent>
               </Select>
             </div>
+
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5 sm:col-span-2">
+              <div>
+                <Label className="cursor-pointer">Prețul e negociabil</Label>
+                <p className="text-xs text-muted-foreground">
+                  Cea mai frecventă întrebare de pe OLX — răspunsul va fi exact.
+                </p>
+              </div>
+              <Switch checked={form.negotiable} onCheckedChange={(v) => set("negotiable", v)} />
+            </div>
+
             <div className="sm:col-span-2">
-              <Label htmlFor="description">Descriere</Label>
-              <Textarea
-                id="description"
-                rows={4}
-                value={form.description}
-                onChange={(e) => setForm({ ...form, description: e.target.value })}
+              <Label htmlFor="warranty">Garanție</Label>
+              <Input
+                id="warranty"
+                placeholder='ex. "12 luni" sau "fără"'
+                value={form.warranty}
+                onChange={(e) => set("warranty", e.target.value)}
               />
             </div>
           </CardContent>
         </Card>
 
-        {/* Atribute */}
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between">
-            <CardTitle className="text-base">Atribute</CardTitle>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setAttrs([...attrs, ["", ""]])}
-            >
-              <Plus className="mr-1.5 h-3.5 w-3.5" /> Adaugă
-            </Button>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {attrs.length === 0 ? (
-              <p className="text-sm text-muted-foreground">Niciun atribut definit.</p>
-            ) : (
-              attrs.map(([k, v], idx) => (
-                <div key={idx} className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
-                  <Input
-                    placeholder="Cheie (ex: Culoare)"
-                    value={k}
-                    onChange={(e) => {
-                      const next = [...attrs];
-                      next[idx] = [e.target.value, v];
-                      setAttrs(next);
-                    }}
-                  />
-                  <Input
-                    placeholder="Valoare (ex: Negru)"
-                    value={v}
-                    onChange={(e) => {
-                      const next = [...attrs];
-                      next[idx] = [k, e.target.value];
-                      setAttrs(next);
-                    }}
-                  />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setAttrs(attrs.filter((_, i) => i !== idx))}
-                    aria-label="Șterge atribut"
-                  >
-                    <Trash2 className="h-4 w-4 text-destructive" />
-                  </Button>
-                </div>
-              ))
-            )}
-          </CardContent>
-        </Card>
-
-        {/* FAQ */}
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between">
-            <CardTitle className="text-base">Întrebări frecvente</CardTitle>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setForm({ ...form, faq: [...form.faq, { question: "", answer: "" }] })}
-            >
-              <Plus className="mr-1.5 h-3.5 w-3.5" /> Adaugă
-            </Button>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {form.faq.length === 0 ? (
-              <p className="text-sm text-muted-foreground">Nicio întrebare definită.</p>
-            ) : (
-              form.faq.map((item, idx) => (
-                <div key={idx} className="grid gap-2 rounded-md border border-border p-3">
-                  <div className="flex items-start gap-2">
-                    <Input
-                      placeholder="Întrebare"
-                      value={item.question}
-                      onChange={(e) => {
-                        const next = [...form.faq];
-                        next[idx] = { ...next[idx], question: e.target.value };
-                        setForm({ ...form, faq: next });
-                      }}
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      onClick={() =>
-                        setForm({ ...form, faq: form.faq.filter((_, i) => i !== idx) })
-                      }
-                      aria-label="Șterge întrebare"
-                    >
-                      <Trash2 className="h-4 w-4 text-destructive" />
-                    </Button>
-                  </div>
-                  <Textarea
-                    placeholder="Răspuns"
-                    rows={2}
-                    value={item.answer}
-                    onChange={(e) => {
-                      const next = [...form.faq];
-                      next[idx] = { ...next[idx], answer: e.target.value };
-                      setForm({ ...form, faq: next });
-                    }}
-                  />
-                </div>
-              ))
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Livrare */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Livrare</CardTitle>
+            <CardTitle className="text-base">TVA și facturare</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="shipping">Livrare disponibilă</Label>
+          <CardContent className="grid gap-4">
+            <div className="flex items-center justify-between gap-3">
+              <Label className="cursor-pointer">Prețul afișat include TVA</Label>
               <Switch
-                id="shipping"
-                checked={form.shipping.available}
-                onCheckedChange={(v) =>
-                  setForm({
-                    ...form,
-                    shipping: v
-                      ? {
-                          available: true,
-                          courier: form.shipping.courier ?? "",
-                          cost_paid_by: form.shipping.cost_paid_by ?? "buyer",
-                          estimated_days: form.shipping.estimated_days ?? 2,
-                        }
-                      : {
-                          available: false,
-                          courier: null,
-                          cost_paid_by: null,
-                          estimated_days: null,
-                        },
-                  })
-                }
+                checked={form.vat.included}
+                onCheckedChange={(v) => set("vat", { ...form.vat, included: v })}
               />
             </div>
-            {form.shipping.available ? (
-              <div className="grid gap-4 sm:grid-cols-3">
-                <div>
-                  <Label htmlFor="courier">Curier</Label>
-                  <Input
-                    id="courier"
-                    value={form.shipping.courier ?? ""}
-                    onChange={(e) =>
-                      setForm({
-                        ...form,
-                        shipping: { ...form.shipping, courier: e.target.value },
-                      })
-                    }
-                  />
-                </div>
-                <div>
-                  <Label>Plătit de</Label>
-                  <Select
-                    value={form.shipping.cost_paid_by ?? "buyer"}
-                    onValueChange={(v) =>
-                      setForm({
-                        ...form,
-                        shipping: {
-                          ...form.shipping,
-                          cost_paid_by: v as "buyer" | "seller",
-                        },
-                      })
-                    }
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="buyer">Cumpărător</SelectItem>
-                      <SelectItem value="seller">Vânzător</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <Label htmlFor="days">Zile estimate</Label>
-                  <Input
-                    id="days"
-                    type="number"
-                    min={1}
-                    value={form.shipping.estimated_days ?? 0}
-                    onChange={(e) =>
-                      setForm({
-                        ...form,
-                        shipping: {
-                          ...form.shipping,
-                          estimated_days: Number(e.target.value),
-                        },
-                      })
-                    }
-                  />
-                </div>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <Label className="cursor-pointer">Se emite factură, TVA deductibil</Label>
+                <p className="text-xs text-muted-foreground">Pentru cumpărători firmă.</p>
               </div>
+              <Switch
+                checked={form.vat.deductible}
+                onCheckedChange={(v) => set("vat", { ...form.vat, deductible: v })}
+              />
+            </div>
+            <div className="max-w-[160px]">
+              <Label htmlFor="vat-rate">Cotă TVA (%)</Label>
+              <Input
+                id="vat-rate"
+                type="number"
+                min={0}
+                max={100}
+                value={form.vat.rate}
+                onChange={(e) => set("vat", { ...form.vat, rate: Number(e.target.value) })}
+              />
+            </div>
+            {!form.vat.included && form.price > 0 ? (
+              <p className="rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+                Botul va spune: preț fără TVA {form.price} {form.currency}, cu TVA{" "}
+                <strong className="text-foreground">
+                  {(form.price * (1 + form.vat.rate / 100)).toFixed(2)} {form.currency}
+                </strong>{" "}
+                — sumă calculată, nu compusă de model.
+              </p>
             ) : null}
           </CardContent>
         </Card>
 
-        {/* Keywords */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Cuvinte cheie</CardTitle>
+            <CardTitle className="text-base">Despre produs</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="flex flex-wrap gap-2 rounded-md border border-input bg-background p-2 focus-within:ring-2 focus-within:ring-ring">
-              {form.keywords.map((k) => (
-                <span
-                  key={k}
-                  className="inline-flex items-center gap-1 rounded-md bg-accent px-2 py-1 text-xs font-medium text-accent-foreground"
-                >
-                  {k}
-                  <button
-                    type="button"
-                    onClick={() => removeKeyword(k)}
-                    className="opacity-70 hover:opacity-100"
-                    aria-label={`Șterge ${k}`}
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </span>
-              ))}
-              <input
-                value={keywordInput}
-                onChange={(e) => setKeywordInput(e.target.value)}
-                onKeyDown={onKeywordKey}
-                placeholder={form.keywords.length === 0 ? "Adaugă cuvinte cheie (Enter)" : ""}
-                className="flex-1 min-w-[120px] bg-transparent px-1 py-1 text-sm outline-none"
-              />
-            </div>
-            <p className="mt-2 text-xs text-muted-foreground">
-              Apasă Enter sau virgulă pentru a adăuga.
+            <p className="mb-2 text-xs text-muted-foreground">
+              Scrie liber, ca într-un anunț: specificații, culoare, ce include, stare. De aici
+              răspunde botul la întrebările care nu sunt acoperite mai sus.
             </p>
+            <Textarea
+              rows={7}
+              value={form.about}
+              onChange={(e) => set("about", e.target.value)}
+              placeholder="ex. Aer condiționat 12000 BTU, culoare albă, folosit un sezon, include telecomandă și kit de montaj."
+            />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Întrebări frecvente</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-xs text-muted-foreground">
+              Opțional. Când întrebarea cumpărătorului se potrivește clar, răspunsul tău se trimite{" "}
+              <strong>cuvânt cu cuvânt</strong>. Toate intră oricum în contextul botului, deci nu se
+              pot pierde.
+            </p>
+            {form.faq.map((f, i) => (
+              <div key={i} className="space-y-2 rounded-xl border border-border/70 p-3">
+                <div className="flex items-center gap-2">
+                  <Input
+                    placeholder="Întrebarea"
+                    value={f.question}
+                    onChange={(e) => setFaq(i, "question", e.target.value)}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    aria-label="Șterge întrebarea"
+                    onClick={() =>
+                      set(
+                        "faq",
+                        form.faq.filter((_, idx) => idx !== i),
+                      )
+                    }
+                  >
+                    <Trash2 className="h-4 w-4 text-destructive" />
+                  </Button>
+                </div>
+                <Textarea
+                  rows={2}
+                  placeholder="Răspunsul tău, exact cum vrei să fie trimis"
+                  value={f.answer}
+                  onChange={(e) => setFaq(i, "answer", e.target.value)}
+                />
+              </div>
+            ))}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => set("faq", [...form.faq, { question: "", answer: "" }])}
+            >
+              <Plus className="mr-2 h-4 w-4" /> Adaugă întrebare
+            </Button>
           </CardContent>
         </Card>
 
         <div className="flex justify-end gap-2">
-          <Button type="button" variant="outline" asChild>
-            <Link to="/products">Anulează</Link>
+          <Button variant="outline" type="button" onClick={() => navigate({ to: "/products" })}>
+            Renunță
           </Button>
           <Button type="submit" disabled={save.isPending}>
-            {save.isPending ? "Se salvează…" : "Salvează"}
+            {save.isPending ? "Se salvează…" : "Salvează produsul"}
           </Button>
         </div>
       </form>

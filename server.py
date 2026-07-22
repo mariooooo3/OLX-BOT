@@ -31,6 +31,8 @@ from loguru import logger
 
 import config
 from core.message_handler import MessageHandler
+from core.product_schema import empty_product, migrate_product
+from core.seller_info import DEFAULT_SELLER_INFO, normalize as normalize_seller
 
 PROJECT_DIR = Path(__file__).resolve().parent
 SETTINGS_PATH = Path("data/settings.json")
@@ -53,6 +55,9 @@ DEFAULT_SETTINGS = {
     "ollama_model": config.OLLAMA_MODEL,
     "log_level": config.LOG_LEVEL,
     "olx_chat_url": "https://www.olx.ro/myaccount/answers/",
+    # locatie / livrare / plata — aceleasi pentru toate anunturile contului,
+    # deci se completeaza o data, nu la fiecare produs
+    "seller_info": dict(DEFAULT_SELLER_INFO),
 }
 
 def _build_llm(settings: dict):
@@ -432,7 +437,11 @@ class BotRunner:
         try:
             # import local: playwright e necesar doar cand chiar pornesti botul
             from adapters.llm.groq_adapter import GroqAdapter
-            from adapters.olx.browser_client import BrowserClient, LoginRequiredError
+            from adapters.olx.browser_client import (
+                BrowserClient,
+                ConversationClosedError,
+                LoginRequiredError,
+            )
 
             account = self.account()
             if account is None:
@@ -449,7 +458,10 @@ class BotRunner:
             backend = (settings.get("llm_backend") or config.LLM_BACKEND).lower()
             self.active_llm = f"{backend}:{getattr(llm, 'model', '?')}"
             handler = MessageHandler(
-                llm=llm, storage=storage, embeddings=config.build_embeddings()
+                llm=llm,
+                storage=storage,
+                embeddings=config.build_embeddings(),
+                seller=settings.get("seller_info"),
             )
             use_queue = config.USE_QUEUE and hasattr(storage, "enqueue_job")
             if config.USE_QUEUE and not use_queue:
@@ -546,6 +558,20 @@ class BotRunner:
                                         mesaj["text"],
                                         "sent",
                                     )
+                            except ConversationClosedError as e:
+                                # cont sters / fir inchis: OLX nu ofera caseta
+                                # de raspuns. Nu e o defectiune a botului, deci
+                                # nu incarcam centrul de erori — doar marcam.
+                                storage.mark_conversation_status(
+                                    mesaj["olx_conversation_id"],
+                                    mesaj["text"],
+                                    "failed",
+                                )
+                                logger.info(
+                                    "[{}] Sar conversatia {} — nu accepta raspunsuri: {}",
+                                    account_display_name(account),
+                                    mesaj["olx_conversation_id"], e,
+                                )
                             except Exception as e:
                                 storage.mark_conversation_status(
                                     mesaj["olx_conversation_id"],
@@ -717,7 +743,7 @@ def list_products(account_id: str | None = None):
         storage = config.build_storage(account["id"])
         for product in storage.get_products():
             products.append(
-                product
+                migrate_product(product)
                 | {
                     "account_id": account["id"],
                     "account_label": account_display_name(account),
@@ -734,7 +760,7 @@ def _find_product(product_id: str, account_id: str | None) -> tuple[dict, dict]:
             (p for p in storage.get_products() if p.get("id") == product_id), None
         )
         if product is not None:
-            return product, account
+            return migrate_product(product), account
     raise HTTPException(status_code=404, detail="Produs inexistent")
 
 
@@ -785,6 +811,7 @@ def save_product(product: dict, account_id: str | None = None):
     storage = config.build_storage(account["id"])
     if not product.get("id"):
         product["id"] = f"prod_{uuid.uuid4().hex[:6]}"
+    product = empty_product() | migrate_product(product)
     # campurile de cont sunt doar adnotari pentru UI, nu se salveaza in catalog
     saved = storage.save_product(
         {k: v for k, v in product.items() if k not in ("account_id", "account_label")}

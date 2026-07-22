@@ -334,7 +334,8 @@ function ConversationsPage() {
                   <div className="mt-2 space-y-1">
                     <div className="text-sm font-semibold">{selectedProduct.title}</div>
                     <div className="text-xs text-muted-foreground">
-                      {selectedProduct.category} · {selectedProduct.subcategory}
+                      {selectedProduct.condition === "nou" ? "Nou" : "Folosit"} ·{" "}
+                      {selectedProduct.stock} în stoc
                     </div>
                     <div className="text-sm">
                       {formatPrice(selectedProduct.price, selectedProduct.currency)} · stoc{" "}

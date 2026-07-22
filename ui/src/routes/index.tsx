@@ -638,7 +638,8 @@ function DashboardPage() {
                           <div className="min-w-0">
                             <div className="truncate font-medium">{product.title}</div>
                             <div className="mt-1 truncate text-xs text-muted-foreground">
-                              {product.category} · {product.subcategory}
+                              {product.condition === "nou" ? "Nou" : "Folosit"} · {product.stock} în
+                              stoc
                             </div>
                           </div>
                           <ArrowUpRight className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />

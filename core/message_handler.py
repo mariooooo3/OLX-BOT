@@ -10,6 +10,7 @@ from adapters.storage.base import BaseStorageAdapter
 from core.fallback_catalog import detect_category
 from core.faq_matcher import FAQMatcher
 from core.product_matcher import match_product
+from core.product_schema import describe_vat, migrate_product
 from core.prompt_builder import build_system_prompt, build_user_prompt
 from core.response_formatter import fallback_response, format_response
 
@@ -18,6 +19,64 @@ def _normalize_question(text: str) -> str:
     text = unicodedata.normalize("NFD", text.casefold())
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
     return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def _negotiable_response(buyer_message: str, product: dict) -> str | None:
+    """Raspuns determinist la "e negociabil?".
+
+    E cea mai frecventa intrebare de pe OLX si tocmai cea la care potrivirea
+    semantica gresea (raspundea despre negociere cuiva care intrebase pretul).
+    Ca bifa pe produs, raspunsul nu mai depinde de niciun prag.
+    """
+    question = _normalize_question(buyer_message)
+    if not re.search(r"\b(negocia\w*|discuta\w*|lasi|last|oferta)\b", question):
+        return None
+    # "cat costa" / "care e pretul" NU sunt intrebari despre negociere
+    if re.search(r"\b(cat costa|care (e|este) pretul)\b", question):
+        return None
+    if product.get("negotiable"):
+        return "Da, prețul este negociabil."
+    return "Nu, prețul nu este negociabil."
+
+
+def _vat_response(buyer_message: str, product: dict) -> str | None:
+    """Raspuns determinist despre TVA si factura.
+
+    Suma cu TVA e CALCULATA, nu compusa de model — o cifra gresita aici
+    inseamna bani pierduti.
+    """
+    question = _normalize_question(buyer_message)
+    if not re.search(r"\b(tva|factura|facturi|deduc\w*)\b", question):
+        return None
+    # NU .capitalize(): ar lowercase-ui restul textului si ar strica "TVA"/"RON"
+    text = describe_vat(product)
+    return text[:1].upper() + text[1:] + "."
+
+
+def _warranty_response(buyer_message: str, product: dict) -> str | None:
+    """Raspuns determinist despre garantie."""
+    question = _normalize_question(buyer_message)
+    if not re.search(r"\bgarantie\b", question):
+        return None
+    warranty = str(product.get("warranty") or "").strip()
+    if not warranty:
+        return None  # necompletat: lasam LLM-ul sa formuleze prudent
+    if re.fullmatch(r"(nu|fara|niciuna|0)", _normalize_question(warranty)):
+        return "Produsul nu are garanție."
+    return f"Produsul are garanție: {warranty}."
+
+
+def _certain_answer(buyer_message: str, product: dict) -> str | None:
+    """Primul raspuns determinist care se aplica (negociere, TVA, garantie).
+
+    Folosit doar dupa ce FAQ-ul nu a acoperit intrebarea: raspunsul scris de
+    vanzator are mereu prioritate fata de formularea generica a botului.
+    """
+    for rule in (_negotiable_response, _vat_response, _warranty_response):
+        answer = rule(buyer_message, product)
+        if answer:
+            return answer
+    return None
 
 
 def _availability_response(buyer_message: str, stock: object) -> str | None:
@@ -80,10 +139,13 @@ class MessageHandler:
         llm: BaseLLMAdapter,
         storage: BaseStorageAdapter,
         embeddings=None,
+        seller: dict | None = None,
     ):
         self.llm = llm
         self.storage = storage
         self.faq_matcher = FAQMatcher(embeddings)
+        # locatie, livrare, plata — comune tuturor anunturilor contului
+        self.seller = seller or {}
 
     def process(self, message: dict) -> str | None:
         """Proceseaza un mesaj nou si returneaza raspunsul de trimis.
@@ -104,7 +166,7 @@ class MessageHandler:
         logger.info("Procesez mesaj din conversatia {}: {!r}",
                     olx_conversation_id, buyer_message)
 
-        products = self.storage.get_products()
+        products = [migrate_product(p) for p in self.storage.get_products()]
         # titlul anuntului identifica exact produsul discutat (potrivire
         # stricta pe titlu); fara el, euristica pe cuvinte cheie
         product = match_product(
@@ -113,7 +175,12 @@ class MessageHandler:
         # ultimul raspuns trimis in conversatie — fallback-ul nu se repeta
         last_response = self._last_bot_response(olx_conversation_id)
 
-        availability = (
+        # Stocul are prioritate chiar si peste FAQ: numarul din catalog e
+        # autoritatea, iar un FAQ scris candva ("mai am 3 bucati") se
+        # invecheste. Restul regulilor deterministe vin DUPA FAQ — daca
+        # vanzatorul a scris un raspuns, cuvintele lui conteaza mai mult
+        # decat o propozitie generica a botului.
+        stock_answer = (
             _availability_response(buyer_message, product.get("stock"))
             if product is not None
             else None
@@ -125,8 +192,8 @@ class MessageHandler:
                 avoid=last_response,
                 category=detect_category(buyer_message, self.faq_matcher),
             )
-        elif availability is not None:
-            response = format_response(availability, avoid=last_response)
+        elif stock_answer is not None:
+            response = format_response(stock_answer, avoid=last_response)
         else:
             faq = self.faq_matcher.best_match(buyer_message, product.get("faq"))
             if faq is not None and faq.direct:
@@ -137,10 +204,17 @@ class MessageHandler:
                     faq.score, faq.question,
                 )
                 response = format_response(faq.answer, avoid=last_response)
+            elif (certain := _certain_answer(buyer_message, product)) is not None:
+                # niciun FAQ nu acopera intrebarea, dar avem faptul in catalog:
+                # raspundem exact, fara sa mai riscam o formulare de model
+                logger.info("Raspuns determinist din datele produsului.")
+                response = format_response(certain, avoid=last_response)
             else:
                 hint = (faq.question, faq.answer) if faq is not None else None
                 system_prompt = build_system_prompt()
-                user_prompt = build_user_prompt(product, buyer_message, faq_hint=hint)
+                user_prompt = build_user_prompt(
+                    product, buyer_message, faq_hint=hint, seller=self.seller
+                )
                 try:
                     raw_response = self.llm.generate_reply(system_prompt, user_prompt)
                 except Exception as e:
