@@ -1,0 +1,22 @@
+# NU baga date locale/secrete in imagine — data/ e montata ca volum la
+# rulare (docker-compose.example.yml), nu are ce cauta copiata in imagine:
+# ar bloca imaginea cu sesiuni de browser reale + .env cu chei, in plus
+# ar umfla imaginea inutil (profilurile Chromium pot avea sute de MB).
+.env
+data/
+logs/
+
+# mediu Python local, nu al containerului (imaginea isi instaleaza singura
+# dependintele din requirements.txt)
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# UI-ul (dashboard-ul) nu ruleaza in acest container — vezi Dockerfile.worker
+ui/node_modules/
+ui/dist/
+ui/.output/
+
+.git/
+.claude/

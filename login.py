@@ -33,6 +33,7 @@ from adapters.olx.session_check import (
     fetch_me,
     login_form_on_screen,
 )
+from core.fingerprint import init_script_for, profile_for
 
 load_dotenv(override=True)
 
@@ -50,6 +51,16 @@ def parse_args() -> argparse.Namespace:
         "--profile",
         default="data/browser_profile",
         help="directorul profilului de browser al contului (unul per cont OLX)",
+    )
+    parser.add_argument(
+        "--proxy",
+        default=None,
+        help=(
+            "proxy-ul contului, ca JSON "
+            '(ex. {"server": "http://host:port", "username": "u", "password": "p"}) '
+            "— trebuie sa fie ACELASI proxy cu care ruleaza botul, altfel "
+            "sesiunea de login si sesiunea botului ies pe IP-uri diferite."
+        ),
     )
     return parser.parse_args()
 
@@ -130,14 +141,36 @@ def main() -> None:
     profile_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Deschid fereastra de browser pentru login manual...")
 
+    proxy = None
+    if args.proxy:
+        try:
+            proxy = json.loads(args.proxy)
+        except Exception:
+            logger.warning("Argumentul --proxy nu e JSON valid — il ignor.")
+
+    # ACEEASI amprenta cu care va rula botul dupa login — determinata de
+    # profile_dir, vezi core/fingerprint.py. Altfel sesiunea creata la login
+    # ar parea, din perspectiva OLX, un dispozitiv diferit de cel care
+    # trimite mesajele ulterior.
+    fingerprint = profile_for(profile_dir)
+
     with sync_playwright() as p:
         launch_kwargs = dict(
             user_data_dir=str(profile_dir),
             headless=False,
             locale="ro-RO",
-            viewport={"width": 1366, "height": 850},
+            timezone_id="Europe/Bucharest",
+            viewport=fingerprint["viewport"],
+            user_agent=fingerprint["user_agent"],
+            device_scale_factor=fingerprint["device_scale_factor"],
             args=["--disable-blink-features=AutomationControlled"],
         )
+        if proxy and proxy.get("server"):
+            launch_kwargs["proxy"] = {
+                k: v for k, v in proxy.items()
+                if k in ("server", "username", "password") and v
+            }
+            logger.info("Login prin proxy: {}", proxy["server"])
         try:
             # Chrome real pare mai putin ca un bot
             context = p.chromium.launch_persistent_context(
@@ -155,6 +188,7 @@ def main() -> None:
                 logger.warning("Browserele Playwright lipsesc — le descarc...")
                 install_playwright_browsers()
                 context = p.chromium.launch_persistent_context(**launch_kwargs)
+        context.add_init_script(init_script_for(profile_dir))
         page = context.pages[0] if context.pages else context.new_page()
 
         me = fetch_me(context)

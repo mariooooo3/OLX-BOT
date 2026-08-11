@@ -30,35 +30,39 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 import config
+from core.accounts import (
+    ACCOUNTS_PATH,
+    DEFAULT_SETTINGS,
+    account_color,
+    account_connected,
+    account_data_dir,
+    account_display_name,
+    account_profile_dir,
+    account_proxy,
+    account_settings_path,
+    active_account,
+    create_account,
+    find_account,
+    load_accounts,
+    load_settings,
+    marker_path,
+    migrate_account_colors,
+    migrate_global_data_to_account,
+    migrate_legacy_profile,
+    read_bot_heartbeat,
+    read_marker,
+    save_accounts,
+    save_settings,
+    write_bot_heartbeat,
+)
+from core.finance import build_finance_report, normalize_transaction
 from core.message_handler import MessageHandler
 from core.product_schema import empty_product, migrate_product
 from core.seller_info import DEFAULT_SELLER_INFO, normalize as normalize_seller
+from generate_docker_compose import build_compose_yaml, service_name
 
 PROJECT_DIR = Path(__file__).resolve().parent
-SETTINGS_PATH = Path("data/settings.json")
-# profilul unic din prima versiune + markerul lui — migrate automat la primul cont
-LEGACY_PROFILE_DIR = Path("data/browser_profile")
-LEGACY_MARKER_PATH = Path("data/olx_logged_in.json")
-# fiecare cont OLX are propriul profil de browser => sesiuni complet separate
-PROFILES_ROOT = Path("data/browser_profiles")
-# datele fiecarui cont (produse, conversatii, setari) — izolate per cont,
-# ca dashboard-ul sa arate strict informatiile contului activ
-ACCOUNTS_DATA_ROOT = Path("data/accounts")
-ACCOUNTS_PATH = Path("data/accounts.json")
-# marker scris de login.py in profilul contului dupa un login confirmat
-SESSION_MARKER_NAME = "olx_session.json"
-DEFAULT_SETTINGS = {
-    "poll_interval_seconds": config.POLL_INTERVAL_SECONDS,
-    # backend-ul + modelul LLM, alese din dashboard (env doar ca implicit)
-    "llm_backend": config.LLM_BACKEND,
-    "groq_model": "llama-3.1-8b-instant",
-    "ollama_model": config.OLLAMA_MODEL,
-    "log_level": config.LOG_LEVEL,
-    "olx_chat_url": "https://www.olx.ro/myaccount/answers/",
-    # locatie / livrare / plata — aceleasi pentru toate anunturile contului,
-    # deci se completeaza o data, nu la fiecare produs
-    "seller_info": dict(DEFAULT_SELLER_INFO),
-}
+
 
 def _build_llm(settings: dict):
     """Construieste LLM-ul respectand backend-ul si modelul din setari."""
@@ -74,70 +78,6 @@ def _apply_log_level(level: str) -> None:
     logger.add(sys.stderr, level=level)
     logger.add("logs/bot.log", level=level,
                rotation="10 MB", retention="14 days", encoding="utf-8")
-
-
-def load_settings(account: dict | None = None) -> dict:
-    """Setarile efective ale unui cont: DEFAULT_SETTINGS + settings.json
-    global + suprascrierile contului (implicit contul activ)."""
-    merged = dict(DEFAULT_SETTINGS)
-    if SETTINGS_PATH.exists():
-        merged.update(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
-    account = account if account is not None else active_account()
-    if account is not None:
-        override_path = account_settings_path(account["id"])
-        if override_path.exists():
-            merged.update(json.loads(override_path.read_text(encoding="utf-8")))
-    return merged
-
-
-def save_settings(settings: dict, account: dict | None = None) -> None:
-    """Scrie setarile contului dat (implicit cel activ); fara niciun cont,
-    scrie in fisierul global."""
-    account = account if account is not None else active_account()
-    path = account_settings_path(account["id"]) if account else SETTINGS_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-
-# --------------------------------------------------------------------- #
-# conturi OLX — un profil de browser separat per cont
-# --------------------------------------------------------------------- #
-
-def load_accounts() -> dict:
-    """{"active": id | None, "accounts": [{"id", "label", "profile_dir"}]}"""
-    if ACCOUNTS_PATH.exists():
-        return json.loads(ACCOUNTS_PATH.read_text(encoding="utf-8"))
-    return {"active": None, "accounts": []}
-
-
-def save_accounts(accounts: dict) -> None:
-    ACCOUNTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ACCOUNTS_PATH.write_text(
-        json.dumps(accounts, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-
-def find_account(accounts: dict, account_id: str | None) -> dict | None:
-    return next((a for a in accounts["accounts"] if a["id"] == account_id), None)
-
-
-def active_account(accounts: dict | None = None) -> dict | None:
-    accounts = accounts if accounts is not None else load_accounts()
-    return find_account(accounts, accounts.get("active"))
-
-
-def marker_path(account: dict) -> Path:
-    return Path(account["profile_dir"]) / SESSION_MARKER_NAME
-
-
-def account_data_dir(account_id: str) -> Path:
-    return ACCOUNTS_DATA_ROOT / account_id
-
-
-def account_settings_path(account_id: str) -> Path:
-    return account_data_dir(account_id) / "settings.json"
 
 
 def account_storage(account: dict | None = None):
@@ -184,53 +124,11 @@ def conversations_in_scope(account_id: str | None) -> list[dict]:
     return entries
 
 
-def account_connected(account: dict) -> bool:
-    """Conectat = login.py a confirmat un login reusit pentru acest profil.
-    Nu folosim doar existenta profilului: Chromium creeaza fisiere de profil
-    la orice lansare, chiar fara login."""
-    return marker_path(account).exists()
-
-
-def read_marker(account: dict) -> dict:
-    try:
-        return json.loads(marker_path(account).read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-# Cate culori distincte are paleta din UI. Indexul e alocat la crearea
-# contului si salvat in accounts.json: stergerea unui cont nu reamesteca
-# culorile celorlalte, asa ca "verde = Mario" ramane adevarat in timp.
-ACCOUNT_COLORS = 8
-
-
-def account_color(account: dict, accounts: dict | None = None) -> int:
-    """Indexul de culoare al contului (0..ACCOUNT_COLORS-1).
-
-    Conturile create inainte de paleta nu au campul salvat — le dam un index
-    din pozitia in registru, stabil cat timp lista nu se schimba.
-    """
-    if isinstance(account.get("color"), int):
-        return account["color"] % ACCOUNT_COLORS
-    accounts = accounts if accounts is not None else load_accounts()
-    ids = [a["id"] for a in accounts["accounts"]]
-    position = ids.index(account["id"]) if account["id"] in ids else 0
-    return position % ACCOUNT_COLORS
-
-
-def _next_color(accounts: dict) -> int:
-    """Prima culoare nefolosita, ca doua conturi noi sa nu arate la fel."""
-    used = {a["color"] for a in accounts["accounts"] if isinstance(a.get("color"), int)}
-    return next(
-        (c for c in range(ACCOUNT_COLORS) if c not in used),
-        len(accounts["accounts"]) % ACCOUNT_COLORS,
-    )
-
-
 def account_info(account: dict, accounts: dict | None = None) -> dict:
     """Descrierea unui cont folosita peste tot in UI (selector de scope,
     etichete pe mesaje/produse, comutatoare)."""
     marker = read_marker(account)
+    proxy = account_proxy(account)
     return {
         "id": account["id"],
         "label": account["label"],
@@ -240,85 +138,12 @@ def account_info(account: dict, accounts: dict | None = None) -> dict:
         "display_name": account_display_name(account),
         "color": account_color(account, accounts),
         "connected": account_connected(account),
+        # parola de proxy NU se intoarce niciodata catre UI — doar adresa,
+        # ca sa stii ce e configurat fara sa expui secretul in dashboard
+        "has_proxy": proxy is not None,
+        "proxy_server": proxy["server"] if proxy else None,
+        "proxy_username": proxy.get("username") if proxy else None,
     }
-
-
-def account_display_name(account: dict) -> str:
-    """Cum se numeste contul in dashboard: numele/emailul OLX detectat la
-    login, altfel eticheta locala ("Cont 2"). Cu mai multe conturi active,
-    "Cont 2" nu spune nimic — numele real da."""
-    marker = read_marker(account)
-    return marker.get("name") or marker.get("username") or account["label"]
-
-
-def create_account(accounts: dict, label: str | None = None) -> dict:
-    account_id = f"acc_{uuid.uuid4().hex[:6]}"
-    label = (label or "").strip() or f"Cont {len(accounts['accounts']) + 1}"
-    profile_dir = PROFILES_ROOT / account_id
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    account = {
-        "id": account_id,
-        "label": label,
-        "profile_dir": str(profile_dir),
-        "color": _next_color(accounts),
-    }
-    accounts["accounts"].append(account)
-    if accounts.get("active") is None:
-        accounts["active"] = account_id
-    save_accounts(accounts)
-    # daca exista date globale din versiunile vechi, devin ale primului cont
-    migrate_global_data_to_account()
-    return account
-
-
-def migrate_legacy_profile() -> None:
-    """Profilul unic din versiunile vechi devine primul cont din registru."""
-    accounts = load_accounts()
-    if accounts["accounts"] or not LEGACY_PROFILE_DIR.exists():
-        return
-    account = {
-        "id": "acc_default",
-        "label": "Cont 1",
-        "profile_dir": str(LEGACY_PROFILE_DIR),
-    }
-    if LEGACY_MARKER_PATH.exists():
-        marker = json.loads(LEGACY_MARKER_PATH.read_text(encoding="utf-8"))
-        marker.setdefault("chat_url", load_settings().get("olx_chat_url"))
-        marker_path(account).write_text(
-            json.dumps(marker, ensure_ascii=False), encoding="utf-8"
-        )
-        LEGACY_MARKER_PATH.unlink()
-    save_accounts({"active": account["id"], "accounts": [account]})
-
-
-def migrate_global_data_to_account() -> None:
-    """products.json/conversations.json globale (din versiunile cu date
-    comune) devin datele contului activ — acum datele sunt per cont."""
-    accounts = load_accounts()
-    account = active_account(accounts) or (
-        accounts["accounts"][0] if accounts["accounts"] else None
-    )
-    if account is None:
-        return  # datele globale raman pe loc pana apare primul cont
-    for name in ("products.json", "conversations.json"):
-        src = Path("data") / name
-        dst = account_data_dir(account["id"]) / name
-        if src.exists() and not dst.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            src.replace(dst)
-            logger.info("Date migrate la contul {}: {}", account["id"], name)
-
-
-def migrate_account_colors() -> None:
-    """Fixeaza culorile conturilor create inainte de paleta, ca sa nu se mai
-    schimbe la stergerea altui cont."""
-    accounts = load_accounts()
-    missing = [a for a in accounts["accounts"] if not isinstance(a.get("color"), int)]
-    if not missing:
-        return
-    for position, account in enumerate(accounts["accounts"]):
-        account.setdefault("color", position % ACCOUNT_COLORS)
-    save_accounts(accounts)
 
 
 migrate_legacy_profile()
@@ -477,8 +302,9 @@ class BotRunner:
             browser = BrowserClient(
                 email=config.OLX_EMAIL,
                 password=config.OLX_PASSWORD,
-                profile_dir=account["profile_dir"],
+                profile_dir=account_profile_dir(account),
                 chat_url=chat_url,
+                proxy=account_proxy(account),
             )
             try:
                 browser.start()
@@ -600,18 +426,66 @@ class BotRunner:
 
     def status(self) -> dict:
         account = self.account()
+        label = account_display_name(account) if account else self.account_id
+        if self.running:
+            return {
+                "account_id": self.account_id,
+                "account_label": label,
+                "running": True,
+                "stopping": self.stopping,
+                "last_poll": self.last_poll,
+                "active_llm": self.active_llm,
+                "errors_today": self.errors_for_today(),
+                "last_error": self.last_error,
+                "source": "process",
+            }
+        # niciun thread local — poate rula ca proces extern (container Docker
+        # pornit manual cu `docker compose up <id>`, vezi bot_worker.py). El
+        # scrie periodic un heartbeat pe disc; il aratam doar daca e recent,
+        # ca sa nu pretindem ca ruleaza un container mort de mult.
+        external = read_bot_heartbeat(self.account_id)
+        if external:
+            return {
+                "account_id": self.account_id,
+                "account_label": label,
+                "running": bool(external.get("running")),
+                "stopping": False,
+                "last_poll": external.get("last_poll"),
+                "active_llm": external.get("active_llm"),
+                "errors_today": external.get("errors_today", 0),
+                "last_error": external.get("last_error"),
+                "source": "container",
+            }
         return {
             "account_id": self.account_id,
-            "account_label": (
-                account_display_name(account) if account else self.account_id
-            ),
-            "running": self.running,
-            "stopping": self.stopping,
+            "account_label": label,
+            "running": False,
+            "stopping": False,
             "last_poll": self.last_poll,
-            "active_llm": self.active_llm if self.running else None,
+            "active_llm": None,
             "errors_today": self.errors_for_today(),
             "last_error": self.last_error,
+            "source": "process",
         }
+
+
+def _guard_external_running(account_id: str) -> None:
+    """Ridica 409 daca un proces extern (container Docker, vezi
+    bot_worker.py) tine deja deschis profilul de browser al contului.
+
+    Chromium nu accepta doua procese pe acelasi profil — a porni un thread
+    local peste un container deja pornit ar bloca ambele instante in loc sa
+    raspunda la mesaje.
+    """
+    external = read_bot_heartbeat(account_id)
+    if external and external.get("running"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Acest cont rulează deja într-un container extern "
+                f"(docker compose stop {account_id} ca să-l oprești de-acolo)."
+            ),
+        )
 
 
 class BotFleet:
@@ -625,6 +499,7 @@ class BotFleet:
     def __init__(self):
         self._runners: dict[str, BotRunner] = {}
         self._lock = threading.Lock()
+        self._start_lock = threading.Lock()
 
     def get(self, account_id: str) -> BotRunner:
         """Runner-ul contului, creat la prima cerere (nu porneste nimic)."""
@@ -646,9 +521,12 @@ class BotFleet:
         return any(r.running for r in self.existing())
 
     def start_account(self, account_id: str) -> BotRunner:
-        runner = self.get(account_id)
-        runner.start()
-        return runner
+        # Verificarea si pornirea raman atomice intre cereri simultane.
+        with self._start_lock:
+            _guard_external_running(account_id)
+            runner = self.get(account_id)
+            runner.start()
+            return runner
 
     def stop_account(self, account_id: str, wait: bool = False) -> None:
         with self._lock:
@@ -657,9 +535,9 @@ class BotFleet:
             return
         runner.stop_and_wait() if wait else runner.stop()
 
-    def start_connected(self) -> list[str]:
-        """Porneste botul pe toate conturile conectate. Intoarce id-urile."""
-        started = []
+    def _startable_accounts(self) -> list[dict]:
+        """Conturile conectate care pot fi pornite acum."""
+        accounts = []
         for account in load_accounts()["accounts"]:
             # contul aflat in login are profilul deschis de fereastra de login;
             # il sarim, dar pornim restul conturilor (altfel un login in curs
@@ -670,20 +548,25 @@ class BotFleet:
                     account_display_name(account),
                 )
                 continue
+            external = read_bot_heartbeat(account["id"])
+            if external and external.get("running"):
+                logger.info(
+                    "Sar peste contul {} — ruleaza deja intr-un container extern.",
+                    account_display_name(account),
+                )
+                continue
             if account_connected(account):
-                self.start_account(account["id"])
-                started.append(account["id"])
-        if len(started) > 1 and config.STORAGE_BACKEND == "db":
-            # backend-ul db nu are inca o coloana account_id: tabelele sunt
-            # comune, deci doua conturi active si-ar amesteca produsele si
-            # conversatiile. Pe json datele sunt deja separate pe directoare.
-            logger.warning(
-                "STORAGE_BACKEND=db nu separa datele pe conturi — cu {} conturi "
-                "pornite simultan, produsele si conversatiile se amesteca. "
-                "Foloseste STORAGE_BACKEND=json pana se adauga coloana account_id.",
-                len(started),
-            )
-        return started
+                accounts.append(account)
+        return accounts
+
+    def start_connected(self) -> list[str]:
+        """Porneste botul pe toate conturile conectate. Intoarce id-urile."""
+        candidates = self._startable_accounts()
+
+        with self._start_lock:
+            for account in candidates:
+                self.get(account["id"]).start()
+        return [a["id"] for a in candidates]
 
     def stop_all(self, wait: bool = False) -> list[str]:
         stopped = [r.account_id for r in self.existing() if r.running]
@@ -717,6 +600,7 @@ class BotFleet:
 
 
 fleet = BotFleet()
+_finance_write_lock = threading.Lock()
 
 app = FastAPI(title="OLX Bot API")
 app.add_middleware(
@@ -852,9 +736,135 @@ def copy_product(product_id: str, body: dict | None = None):
 
 @app.delete("/api/products/{product_id}")
 def delete_product(product_id: str, account_id: str | None = None):
-    _, account = _find_product(product_id, account_id)
-    config.build_storage(account["id"]).delete_product(product_id)
+    with _finance_write_lock:
+        _, account = _find_product(product_id, account_id)
+        storage = config.build_storage(account["id"])
+        if storage.get_finance_transactions(product_id):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Produsul are istoric în gestiune. Șterge mai întâi "
+                    "tranzacțiile lui financiare."
+                ),
+            )
+        storage.delete_product(product_id)
     return {"ok": True, "account_id": account["id"]}
+
+
+# --------------------------------------------------------------------- #
+# gestiune financiara
+# --------------------------------------------------------------------- #
+
+@app.get("/api/finance")
+def get_finance(account_id: str | None = None):
+    """Balanta globala, profitabilitatea produselor si registrul de miscari."""
+    accounts = accounts_in_scope(account_id)
+
+    products = []
+    transactions = []
+    for account in accounts:
+        storage = config.build_storage(account["id"])
+        account_data = {
+            "account_id": account["id"],
+            "account_label": account_display_name(account),
+        }
+        products.extend(
+            migrate_product(product) | account_data
+            for product in storage.get_products()
+        )
+        transactions.extend(
+            transaction | account_data
+            for transaction in storage.get_finance_transactions()
+        )
+    return build_finance_report(products, transactions)
+
+
+@app.post("/api/finance/transactions")
+def save_finance_transaction(body: dict, account_id: str | None = None):
+    with _finance_write_lock:
+        product, account = _find_product(body.get("product_id", ""), account_id)
+        storage = config.build_storage(account["id"])
+        raw = body | {
+            "id": f"tx_{uuid.uuid4().hex[:10]}",
+            # moneda se ingheata acum, la inregistrare: schimbarea ulterioara
+            # a monedei produsului nu mai reeticheteaza sumele deja facute
+            "currency": body.get("currency") or product.get("currency") or "RON",
+            "occurred_at": body.get("occurred_at")
+            or datetime.now(timezone.utc).date().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            transaction = normalize_transaction(raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if transaction["kind"] == "sale":
+            report = build_finance_report(
+                [migrate_product(product)],
+                storage.get_finance_transactions(product["id"]),
+            )
+            available = report["products"][0]["stock_quantity"]
+            if transaction["quantity"] > available:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Poți înregistra cel mult {available} bucăți vândute. "
+                        "Adaugă mai întâi achiziția în gestiune."
+                    ),
+                )
+
+        saved = storage.save_finance_transaction(transaction)
+    return saved | {
+        "account_id": account["id"],
+        "account_label": account_display_name(account),
+    }
+
+
+@app.delete("/api/finance/transactions/{transaction_id}")
+def delete_finance_transaction(
+    transaction_id: str,
+    account_id: str | None = None,
+):
+    with _finance_write_lock:
+        for account in accounts_in_scope(account_id):
+            storage = config.build_storage(account["id"])
+            transactions = storage.get_finance_transactions()
+            target = next(
+                (item for item in transactions if item.get("id") == transaction_id),
+                None,
+            )
+            if target is None:
+                continue
+
+            remaining = [
+                item for item in transactions if item.get("id") != transaction_id
+            ]
+            if target.get("kind") == "purchase":
+                purchased = sum(
+                    int(item.get("quantity") or 0)
+                    for item in remaining
+                    if item.get("product_id") == target.get("product_id")
+                    and item.get("kind") == "purchase"
+                )
+                sold = sum(
+                    int(item.get("quantity") or 0)
+                    for item in remaining
+                    if item.get("product_id") == target.get("product_id")
+                    and item.get("kind") == "sale"
+                )
+                if sold > purchased:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Achiziția nu poate fi ștearsă deoarece ar rămâne "
+                            "mai multe bucăți vândute decât cumpărate."
+                        ),
+                    )
+
+            storage.delete_finance_transaction(transaction_id)
+            return {"ok": True, "account_id": account["id"]}
+
+    raise HTTPException(status_code=404, detail="Tranzacție inexistentă")
 
 
 # --------------------------------------------------------------------- #
@@ -1084,15 +1094,19 @@ class LoginLauncher:
         if self.running:
             return
         self.account_id = account["id"]
-        self._proc = subprocess.Popen(
-            [
-                sys.executable,
-                str(PROJECT_DIR / "login.py"),
-                "--profile",
-                account["profile_dir"],
-            ],
-            cwd=str(PROJECT_DIR),
-        )
+        args = [
+            sys.executable,
+            str(PROJECT_DIR / "login.py"),
+            "--profile",
+            account_profile_dir(account),
+        ]
+        proxy = account_proxy(account)
+        if proxy:
+            # ACELASI proxy cu care va rula botul — altfel sesiunea de login
+            # si sesiunea botului ies pe IP-uri diferite, ceea ce OLX poate
+            # trata la fel de suspect ca sesiuni de pe conturi diferite.
+            args += ["--proxy", json.dumps(proxy)]
+        self._proc = subprocess.Popen(args, cwd=str(PROJECT_DIR))
 
     def last_result(self) -> str | None:
         """'success' | 'failed' | None (inca ruleaza / n-a rulat)."""
@@ -1132,6 +1146,7 @@ def olx_login():
     account = active_account(accounts)
     if account is None:
         account = create_account(accounts)
+    _guard_external_running(account["id"])
     # botul tine profilul contului deschis headless — oprim DOAR runner-ul
     # acestui cont (Chromium nu accepta doua procese pe acelasi profil);
     # celelalte conturi continua sa raspunda
@@ -1153,6 +1168,7 @@ def olx_login_account(account_id: str):
             detail="O fereastră de login e deja deschisă — termin-o pe aceea întâi.",
         )
     account = _account_or_404(account_id)
+    _guard_external_running(account_id)
     # botul acestui cont tine profilul deschis headless; Chromium nu accepta
     # doua procese pe acelasi profil, deci il oprim doar pe el
     fleet.stop_account(account_id, wait=True)
@@ -1175,6 +1191,291 @@ def add_olx_account(body: dict | None = None):
         save_accounts(accounts)
     login_launcher.start(account)
     return {"id": account["id"], "label": account["label"]}
+
+
+@app.put("/api/olx/accounts/{account_id}/proxy")
+def set_account_proxy(account_id: str, body: dict):
+    """Configureaza sau sterge proxy-ul de iesire al contului.
+
+    Corp gol / fara `server` = sterge proxy-ul (contul iese direct). Se aplica
+    de la urmatoarea pornire a botului (sau a ferestrei de login) pe acest
+    cont — un cont deja pornit tine contextul de browser deschis cu proxy-ul
+    vechi pana la restart.
+    """
+    accounts = load_accounts()
+    account = find_account(accounts, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Cont inexistent")
+
+    server_url = str(body.get("server") or "").strip()
+    if not server_url:
+        account.pop("proxy", None)
+    else:
+        # parola nu se trimite niciodata inapoi catre UI (vezi account_info),
+        # deci un camp gol la editare inseamna "neschimbata", nu "sterge-o"
+        existing = account.get("proxy") if isinstance(account.get("proxy"), dict) else {}
+        proxy = {"server": server_url}
+        username = str(body.get("username") or "").strip()
+        password = str(body.get("password") or "").strip()
+        proxy["username"] = username or existing.get("username") or None
+        proxy["password"] = password or existing.get("password") or None
+        proxy = {k: v for k, v in proxy.items() if v}
+        account["proxy"] = proxy
+    save_accounts(accounts)
+    logger.info(
+        "Proxy {} pentru contul {}.",
+        "configurat" if server_url else "sters",
+        account_display_name(account),
+    )
+    return {"ok": True, "account_id": account_id, "has_proxy": bool(server_url)}
+
+
+# --------------------------------------------------------------------- #
+# control Docker per cont — pornire/oprire in container, direct din dashboard
+#
+# Dashboard-ul (acest proces) ruleaza pe Windows, in afara Docker-ului —
+# apeleaza `docker compose` prin subprocess, la fel cum apeleaza login.py.
+# build+up dureaza cateva minute la prima rulare (descarca imaginea de baza),
+# deci ruleaza intr-un thread de fundal, cu progres urmarit in _docker_jobs —
+# acelasi tipar ca la descarcarea modelelor Ollama (_pull_jobs) mai jos.
+# --------------------------------------------------------------------- #
+
+COMPOSE_PATH = PROJECT_DIR / "docker-compose.yml"
+DOCKER_BUILD_TIMEOUT = 1800  # 30 min — prima rulare descarca imaginea de baza (~1-2GB)
+DOCKER_UP_TIMEOUT = 120
+DOCKER_STOP_TIMEOUT = 60
+
+_docker_jobs: dict[str, dict] = {}
+_docker_jobs_lock = threading.Lock()
+_docker_daemon_cache: dict = {"at": 0.0, "available": None, "detail": None}
+DOCKER_DAEMON_CACHE_TTL = 10  # secunde — nu bate `docker info` la fiecare cerere a UI-ului
+
+
+def _docker_available() -> dict:
+    """{"available": bool, "detail": str | None} — daca Docker Desktop nu
+    ruleaza sau `docker` nu e instalat, UI-ul arata mesajul clar in loc de
+    o eroare criptica la prima incercare de pornire."""
+    now = time.time()
+    if (
+        _docker_daemon_cache["available"] is not None
+        and now - _docker_daemon_cache["at"] < DOCKER_DAEMON_CACHE_TTL
+    ):
+        return {
+            "available": _docker_daemon_cache["available"],
+            "detail": _docker_daemon_cache["detail"],
+        }
+    try:
+        result = subprocess.run(
+            ["docker", "info"], capture_output=True, text=True, timeout=5,
+            cwd=str(PROJECT_DIR),
+        )
+        available = result.returncode == 0
+        detail = None if available else (
+            "Docker e instalat, dar daemonul nu răspunde — pornește Docker Desktop."
+        )
+    except FileNotFoundError:
+        available, detail = False, (
+            "Comanda `docker` nu a fost găsită — instalează Docker Desktop."
+        )
+    except Exception as e:
+        available, detail = False, f"Nu am putut verifica Docker: {e}"
+    _docker_daemon_cache.update(at=now, available=available, detail=detail)
+    return {"available": available, "detail": detail}
+
+
+def _set_docker_job(account_id: str, **fields) -> None:
+    with _docker_jobs_lock:
+        job = _docker_jobs.setdefault(account_id, {})
+        job.update(fields)
+
+
+def _run_compose(args: list[str], timeout: float) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["docker", "compose", *args],
+        capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR),
+    )
+
+
+def _log_tail(result: subprocess.CompletedProcess, lines: int = 30) -> str:
+    text = (result.stderr or result.stdout or "").strip()
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def _run_docker_start(account_id: str) -> None:
+    svc = service_name(account_id)
+    try:
+        runner = fleet.get(account_id)
+        if runner.running:
+            _set_docker_job(account_id, step="opresc botul local (rula ca thread)...")
+            fleet.stop_account(account_id, wait=True)
+
+        _set_docker_job(account_id, step="generez docker-compose.yml...")
+        yaml_text, _, _ = build_compose_yaml()
+        COMPOSE_PATH.write_text(yaml_text, encoding="utf-8")
+
+        _set_docker_job(
+            account_id,
+            step="construiesc imaginea (poate dura câteva minute la prima rulare)...",
+        )
+        build = _run_compose(["build", svc], timeout=DOCKER_BUILD_TIMEOUT)
+        if build.returncode != 0:
+            _set_docker_job(
+                account_id, step="eșuat", done=True,
+                error="Construirea imaginii a eșuat.", log_tail=_log_tail(build),
+            )
+            return
+
+        _set_docker_job(account_id, step="pornesc containerul...")
+        up = _run_compose(["up", "-d", svc], timeout=DOCKER_UP_TIMEOUT)
+        if up.returncode != 0:
+            _set_docker_job(
+                account_id, step="eșuat", done=True,
+                error="Pornirea containerului a eșuat.", log_tail=_log_tail(up),
+            )
+            return
+
+        _set_docker_job(account_id, step="pornit", done=True, error=None, log_tail="")
+        logger.info("Container Docker pornit pentru contul {}.", account_id)
+    except subprocess.TimeoutExpired:
+        _set_docker_job(
+            account_id, step="eșuat", done=True,
+            error="A durat prea mult (timeout) — încearcă din nou.", log_tail="",
+        )
+    except FileNotFoundError:
+        _set_docker_job(
+            account_id, step="eșuat", done=True,
+            error="Comanda `docker` nu a fost găsită — instalează Docker Desktop.",
+            log_tail="",
+        )
+    except Exception as e:
+        _set_docker_job(account_id, step="eșuat", done=True, error=str(e), log_tail="")
+        logger.error("Pornirea in Docker a esuat pentru {}: {}", account_id, e)
+
+
+def _run_docker_stop(account_id: str) -> None:
+    svc = service_name(account_id)
+    try:
+        _set_docker_job(account_id, step="opresc containerul...")
+        result = _run_compose(["stop", svc], timeout=DOCKER_STOP_TIMEOUT)
+        if result.returncode != 0:
+            _set_docker_job(
+                account_id, step="eșuat", done=True,
+                error="Oprirea containerului a eșuat.", log_tail=_log_tail(result),
+            )
+            return
+        _set_docker_job(account_id, step="oprit", done=True, error=None, log_tail="")
+        logger.info("Container Docker oprit pentru contul {}.", account_id)
+    except Exception as e:
+        _set_docker_job(account_id, step="eșuat", done=True, error=str(e), log_tail="")
+        logger.error("Oprirea containerului Docker a esuat pentru {}: {}", account_id, e)
+
+
+def _run_docker_restart(account_id: str) -> None:
+    """Opreste containerul (daca ruleaza) si il porneste din nou — util dupa
+    ce schimbi setarile contului (ex. modelul LLM) din dashboard: bot_worker.py
+    le citeste o singura data la pornire, nu le reincarca din mers cat timp
+    ruleaza (la fel ca BotRunner-ul thread-based), deci setarile noi se aplica
+    doar dupa un restart efectiv.
+    """
+    svc = service_name(account_id)
+    try:
+        _set_docker_job(account_id, step="opresc containerul (restart)...")
+        # poate esua daca nu ruleaza deja (nimic de oprit) — nu e o problema,
+        # continuam oricum cu pornirea
+        _run_compose(["stop", svc], timeout=DOCKER_STOP_TIMEOUT)
+    except Exception as e:
+        logger.debug("Restart Docker: oprirea nu a fost necesara/a esuat pentru {}: {}", account_id, e)
+    _run_docker_start(account_id)
+
+
+@app.get("/api/docker/status")
+def docker_status():
+    return _docker_available()
+
+
+@app.get("/api/docker/accounts")
+def docker_accounts_status():
+    """Starea Docker a fiecarui cont: job in curs (daca exista) + daca un
+    container extern raporteaza ca ruleaza (heartbeat-ul din bot_worker.py)."""
+    with _docker_jobs_lock:
+        jobs = {k: dict(v) for k, v in _docker_jobs.items()}
+    result = []
+    for account in load_accounts()["accounts"]:
+        heartbeat = read_bot_heartbeat(account["id"])
+        result.append({
+            "account_id": account["id"],
+            "service_name": service_name(account["id"]),
+            "container_running": bool(heartbeat and heartbeat.get("running")),
+            "job": jobs.get(account["id"]),
+        })
+    return result
+
+
+@app.post("/api/docker/accounts/{account_id}/start")
+def docker_start_account(account_id: str):
+    account = _account_or_404(account_id)
+    if not account_connected(account):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Contul „{account_display_name(account)}” nu e conectat "
+                "— fă login întâi (containerul nu poate rezolva CAPTCHA-ul)."
+            ),
+        )
+    availability = _docker_available()
+    if not availability["available"]:
+        raise HTTPException(status_code=503, detail=availability["detail"])
+    with _docker_jobs_lock:
+        existing = _docker_jobs.get(account_id)
+        if existing and not existing.get("done"):
+            return {"started": False, "already_running": True, "job": existing}
+        _docker_jobs[account_id] = {
+            "step": "în așteptare...", "done": False, "error": None, "log_tail": "",
+        }
+    threading.Thread(target=_run_docker_start, args=(account_id,), daemon=True).start()
+    return {"started": True}
+
+
+@app.post("/api/docker/accounts/{account_id}/stop")
+def docker_stop_account(account_id: str):
+    _account_or_404(account_id)
+    availability = _docker_available()
+    if not availability["available"]:
+        raise HTTPException(status_code=503, detail=availability["detail"])
+    with _docker_jobs_lock:
+        existing = _docker_jobs.get(account_id)
+        if existing and not existing.get("done"):
+            return {"stopped": False, "already_running": True, "job": existing}
+        _docker_jobs[account_id] = {
+            "step": "în așteptare...", "done": False, "error": None, "log_tail": "",
+        }
+    threading.Thread(target=_run_docker_stop, args=(account_id,), daemon=True).start()
+    return {"stopped": True}
+
+
+@app.post("/api/docker/accounts/{account_id}/restart")
+def docker_restart_account(account_id: str):
+    account = _account_or_404(account_id)
+    if not account_connected(account):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Contul „{account_display_name(account)}” nu e conectat "
+                "— fă login întâi."
+            ),
+        )
+    availability = _docker_available()
+    if not availability["available"]:
+        raise HTTPException(status_code=503, detail=availability["detail"])
+    with _docker_jobs_lock:
+        existing = _docker_jobs.get(account_id)
+        if existing and not existing.get("done"):
+            return {"started": False, "already_running": True, "job": existing}
+        _docker_jobs[account_id] = {
+            "step": "în așteptare...", "done": False, "error": None, "log_tail": "",
+        }
+    threading.Thread(target=_run_docker_restart, args=(account_id,), daemon=True).start()
+    return {"restarted": True}
 
 
 @app.post("/api/olx/accounts/{account_id}/activate")
@@ -1208,10 +1509,11 @@ def sign_out_olx_account(account_id: str, purge: bool = False):
     account = find_account(accounts, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="Cont inexistent")
+    _guard_external_running(account_id)
     # botul acestui cont tine profilul deschis — nu putem sterge peste el
     fleet.stop_account(account_id, wait=True)
     # profilul contine si markerul de login => contul apare "neconectat"
-    shutil.rmtree(account["profile_dir"], ignore_errors=True)
+    shutil.rmtree(account_profile_dir(account), ignore_errors=True)
     if not purge:
         return {"ok": True, "active": accounts.get("active"), "purged": False}
 

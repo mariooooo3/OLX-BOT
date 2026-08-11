@@ -6,6 +6,15 @@ export function formatPrice(price: number, currency: string) {
   }).format(price);
 }
 
+export function formatMoney(value: number, currency = "RON") {
+  return new Intl.NumberFormat("ro-RO", {
+    style: "currency",
+    currency,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
 export function formatDateTime(iso: string) {
   return new Intl.DateTimeFormat("ro-RO", {
     dateStyle: "short",

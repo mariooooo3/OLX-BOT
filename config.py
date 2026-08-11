@@ -7,6 +7,7 @@ MVP1 -> MVP2 = doar variabile de mediu, zero cod modificat:
   USE_QUEUE=false | true   (coada de joburi + workeri separati)
 """
 import os
+import threading
 
 from dotenv import load_dotenv
 
@@ -29,6 +30,9 @@ USE_QUEUE = os.environ.get("USE_QUEUE", "false").lower() in ("1", "true", "yes")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 
+_embeddings_instance = None
+_embeddings_lock = threading.Lock()
+
 
 def build_llm(settings: dict | None = None):
     """LLM-ul activ. `settings` (din dashboard) are prioritate peste .env:
@@ -50,20 +54,37 @@ def build_embeddings():
     """
     if EMBEDDINGS_BACKEND in ("off", "none", "false", "0"):
         return None
-    from adapters.embeddings.fastembed_adapter import FastEmbedAdapter
-    return FastEmbedAdapter()
+    global _embeddings_instance
+    if _embeddings_instance is None:
+        with _embeddings_lock:
+            if _embeddings_instance is None:
+                from adapters.embeddings.fastembed_adapter import FastEmbedAdapter
+
+                class ProcessFastEmbedAdapter(FastEmbedAdapter):
+                    def __init__(self):
+                        super().__init__()
+                        self._load_lock = threading.Lock()
+
+                    def _load(self):
+                        if self._model is not None or self._failed:
+                            return self._model
+                        with self._load_lock:
+                            return super()._load()
+
+                _embeddings_instance = ProcessFastEmbedAdapter()
+    return _embeddings_instance
 
 
 def build_storage(account_id: str | None = None):
-    """Stocarea datelor. Cu account_id, datele (produse, conversatii) sunt
-    izolate per cont OLX in data/accounts/<account_id>/.
+    """Stocarea datelor, izolata per cont OLX.
 
-    Backend-ul db nu are inca separare per cont (tabelele sunt globale) —
-    de adaugat o coloana account_id cand se trece pe db cu mai multe conturi.
+    JSON: fiecare cont are propriul folder, data/accounts/<account_id>/.
+    DB: toate conturile impart acelasi DB, dar fiecare rand e marcat cu
+    account_id — vezi adapters/storage/db_adapter.py.
     """
     if STORAGE_BACKEND == "db":
         from adapters.storage.db_adapter import DBAdapter
-        return DBAdapter(DATABASE_URL)
+        return DBAdapter(DATABASE_URL, account_id)
     from adapters.storage.json_adapter import JSONAdapter
     if account_id:
         return JSONAdapter(data_dir=f"data/accounts/{account_id}")

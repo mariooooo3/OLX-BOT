@@ -1,5 +1,12 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LayoutDashboard, MessagesSquare, Package, Settings, Bot } from "lucide-react";
+import {
+  LayoutDashboard,
+  MessagesSquare,
+  Package,
+  Settings,
+  Bot,
+  ChartNoAxesCombined,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ServerStatusBanner } from "@/components/server-status-banner";
@@ -9,7 +16,7 @@ import { AccountScopeSwitcher } from "@/components/account-scope";
 import type { CSSProperties, ReactNode } from "react";
 
 type NavItem = {
-  to: "/" | "/conversations" | "/products" | "/settings";
+  to: "/" | "/conversations" | "/products" | "/finance" | "/settings";
   label: string;
   icon: typeof LayoutDashboard;
   exact?: boolean;
@@ -19,6 +26,7 @@ const nav: NavItem[] = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, exact: true },
   { to: "/conversations", label: "Conversații", icon: MessagesSquare },
   { to: "/products", label: "Produse", icon: Package },
+  { to: "/finance", label: "Gestiune", icon: ChartNoAxesCombined },
   { to: "/settings", label: "Setări", icon: Settings },
 ];
 
@@ -133,7 +141,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       {/* Mobile bottom bar — floating glass island */}
       <nav className="fixed inset-x-4 bottom-4 z-30 rounded-2xl border border-border/70 bg-card/85 shadow-[0_2px_4px_oklch(0.25_0.02_230/0.05),0_28px_56px_-20px_oklch(0.25_0.02_230/0.2)] backdrop-blur-xl md:hidden">
-        <div className="grid grid-cols-4">
+        <div className="grid grid-cols-5">
           {nav.map((item) => {
             const active = isActive(item.to, item.exact);
             const Icon = item.icon;

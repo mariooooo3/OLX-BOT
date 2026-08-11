@@ -32,6 +32,126 @@ export interface Product {
   faq: { question: string; answer: string }[];
 }
 
+export type FinanceTransactionKind = "purchase" | "sale" | "expense";
+
+export interface FinanceTransaction {
+  id: string;
+  product_id: string;
+  product_title: string;
+  account_id?: string;
+  account_label?: string;
+  kind: FinanceTransactionKind;
+  quantity: number;
+  unit_price: number;
+  currency: string;
+  gross_total: number;
+  net_total: number;
+  vat_rate: number;
+  vat_included: boolean;
+  vat_deductible: boolean;
+  vat_amount: number;
+  occurred_at: string;
+  note: string;
+  created_at: string;
+}
+
+export interface FinanceTransactionInput {
+  product_id: string;
+  kind: FinanceTransactionKind;
+  quantity: number;
+  unit_price: number;
+  vat_rate: number;
+  vat_included: boolean;
+  vat_deductible: boolean;
+  occurred_at: string;
+  note: string;
+}
+
+export interface ProductFinance {
+  product_id: string;
+  title: string;
+  currency: string;
+  sale_price: number;
+  vat_rate: number;
+  sale_vat_included: boolean;
+  account_id?: string;
+  account_label?: string;
+  purchase_quantity: number;
+  sold_quantity: number;
+  stock_quantity: number;
+  sell_through_rate: number;
+  average_purchase_price: number;
+  average_sale_price: number;
+  purchase_cost: number;
+  sales_revenue: number;
+  additional_costs: number;
+  invested: number;
+  cash_balance: number;
+  realized_profit: number;
+  margin_rate: number;
+  roi: number;
+  inventory_value: number;
+  projected_revenue: number;
+  projected_profit: number;
+  recoverable_vat: number;
+  sales_vat: number;
+  vat_balance: number;
+  average_days_to_sale: number | null;
+  transaction_count: number;
+}
+
+export interface FinanceCurrencySummary {
+  currency: string;
+  purchase_cost: number;
+  sales_revenue: number;
+  additional_costs: number;
+  invested: number;
+  cash_balance: number;
+  realized_profit: number;
+  inventory_value: number;
+  projected_revenue: number;
+  projected_profit: number;
+  recoverable_vat: number;
+  sales_vat: number;
+  vat_balance: number;
+  purchase_quantity: number;
+  sold_quantity: number;
+  stock_quantity: number;
+  sell_through_rate: number;
+  product_count: number;
+  active_product_count: number;
+}
+
+export interface FinanceSummary {
+  currency: string | null;
+  mixed_currencies: boolean;
+  purchase_cost: number | null;
+  sales_revenue: number | null;
+  additional_costs: number | null;
+  invested: number | null;
+  cash_balance: number | null;
+  realized_profit: number | null;
+  inventory_value: number | null;
+  projected_revenue: number | null;
+  projected_profit: number | null;
+  recoverable_vat: number | null;
+  sales_vat: number | null;
+  vat_balance: number | null;
+  purchase_quantity: number;
+  sold_quantity: number;
+  stock_quantity: number;
+  sell_through_rate: number;
+  product_count: number;
+  active_product_count: number;
+}
+
+export interface FinanceReport {
+  summary: FinanceSummary;
+  currency_summaries: FinanceCurrencySummary[];
+  products: ProductFinance[];
+  transactions: FinanceTransaction[];
+}
+
 export interface ConversationMessage {
   id: string;
   timestamp: string;

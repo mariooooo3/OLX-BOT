@@ -71,7 +71,8 @@ function ProductsPage() {
       toast.success("Produs șters");
       setPendingDelete(null);
     },
-    onError: () => toast.error("Nu am putut șterge produsul"),
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "Nu am putut șterge produsul"),
   });
 
   return (

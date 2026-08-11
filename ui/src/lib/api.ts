@@ -6,6 +6,9 @@ import type {
   Settings,
   LlmModelsResponse,
   PullJob,
+  FinanceReport,
+  FinanceTransaction,
+  FinanceTransactionInput,
 } from "./types";
 
 // Backend-ul FastAPI al botului (server.py). Configurabil prin VITE_API_URL.
@@ -69,6 +72,26 @@ export async function copyProduct(
 
 export async function deleteProduct(id: string, accountId?: string): Promise<void> {
   await request(`/api/products/${encodeURIComponent(id)}${accountScope(accountId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function getFinance(accountId?: string): Promise<FinanceReport> {
+  return request<FinanceReport>(`/api/finance${accountScope(accountId)}`);
+}
+
+export async function saveFinanceTransaction(
+  transaction: FinanceTransactionInput,
+  accountId?: string,
+): Promise<FinanceTransaction> {
+  return request<FinanceTransaction>(`/api/finance/transactions${accountScope(accountId)}`, {
+    method: "POST",
+    body: JSON.stringify(transaction),
+  });
+}
+
+export async function deleteFinanceTransaction(id: string, accountId?: string): Promise<void> {
+  await request(`/api/finance/transactions/${encodeURIComponent(id)}${accountScope(accountId)}`, {
     method: "DELETE",
   });
 }
@@ -192,6 +215,11 @@ export interface OlxAccount {
   name: string | null;
   connected: boolean;
   active: boolean;
+  /** are proxy de iesire configurat (conturi diferite, IP-uri diferite) */
+  has_proxy: boolean;
+  /** adresa proxy-ului, fara credentiale — doar de afisat */
+  proxy_server: string | null;
+  proxy_username: string | null;
 }
 
 export interface OlxSession {
@@ -224,6 +252,87 @@ export async function addOlxAccount(label?: string): Promise<{ id: string; label
   return request<{ id: string; label: string }>("/api/olx/accounts", {
     method: "POST",
     body: JSON.stringify({ label: label ?? "" }),
+  });
+}
+
+/**
+ * Configureaza (sau, cu `server` gol, sterge) proxy-ul de iesire al contului.
+ * Se aplica de la urmatoarea pornire a botului / fereastra de login pe acest
+ * cont — un cont deja pornit pastreaza proxy-ul cu care a fost lansat.
+ */
+export async function setAccountProxy(
+  accountId: string,
+  proxy: { server: string; username?: string; password?: string },
+): Promise<{ ok: boolean; has_proxy: boolean }> {
+  return request<{ ok: boolean; has_proxy: boolean }>(
+    `/api/olx/accounts/${encodeURIComponent(accountId)}/proxy`,
+    { method: "PUT", body: JSON.stringify(proxy) },
+  );
+}
+
+// --------------------------------------------------------------------- //
+// Docker — pornire/oprire in container, direct din dashboard
+// (server.py apeleaza `docker compose` in fundal; vezi docs/docker-multi-cont.md)
+// --------------------------------------------------------------------- //
+
+export interface DockerJob {
+  /** pasul curent, in romana, de afisat direct in UI (ex. "construiesc imaginea...") */
+  step: string;
+  done: boolean;
+  error: string | null;
+  /** ultimele linii din output-ul docker, utile la eroare */
+  log_tail: string;
+}
+
+export interface DockerAccountStatus {
+  account_id: string;
+  service_name: string;
+  /** heartbeat recent scris de container (bot_worker.py) — separat de `job`,
+   *  care e doar despre operatia de build/start/stop in curs */
+  container_running: boolean;
+  job: DockerJob | null;
+}
+
+export interface DockerStatus {
+  available: boolean;
+  /** motivul cand available=false (Docker Desktop oprit, neinstalat etc.) */
+  detail: string | null;
+}
+
+export async function getDockerStatus(): Promise<DockerStatus> {
+  return request<DockerStatus>("/api/docker/status");
+}
+
+export async function getDockerAccounts(): Promise<DockerAccountStatus[]> {
+  return request<DockerAccountStatus[]>("/api/docker/accounts");
+}
+
+/** Opreste botul local (daca rula ca thread), genereaza docker-compose.yml,
+ *  construieste imaginea si porneste containerul — poate dura minute la
+ *  prima rulare; urmareste progresul cu getDockerAccounts(). */
+export async function startAccountDocker(
+  accountId: string,
+): Promise<{ started: boolean; already_running?: boolean }> {
+  return request(`/api/docker/accounts/${encodeURIComponent(accountId)}/start`, {
+    method: "POST",
+  });
+}
+
+export async function stopAccountDocker(
+  accountId: string,
+): Promise<{ stopped: boolean; already_running?: boolean }> {
+  return request(`/api/docker/accounts/${encodeURIComponent(accountId)}/stop`, {
+    method: "POST",
+  });
+}
+
+/** Oprește și repornește containerul — necesar ca setările noi (ex. modelul
+ *  LLM) să se aplice; bot_worker.py le citește o singură dată la pornire. */
+export async function restartAccountDocker(
+  accountId: string,
+): Promise<{ restarted: boolean; already_running?: boolean }> {
+  return request(`/api/docker/accounts/${encodeURIComponent(accountId)}/restart`, {
+    method: "POST",
   });
 }
 

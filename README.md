@@ -82,6 +82,12 @@ Se deschide automat dashboard-ul în browser la `http://localhost:8080`.
 > original nu se partajează. Datele (produse, conversații, sesiunea de
 > login) rămân locale pe calculatorul respectiv și nu ajung pe git.
 
+## Mai multe conturi, fiecare cu IP propriu
+
+Cu mai multe conturi OLX pe același calculator, poți da fiecăruia propriul
+proxy de ieșire (buton „Proxy" din panoul de conturi) și, opțional, propriul
+container Docker — vezi [docs/docker-multi-cont.md](docs/docker-multi-cont.md).
+
 ## Probleme frecvente
 
 - **"Python nu e instalat sau nu e in PATH"** — reinstalează Python și

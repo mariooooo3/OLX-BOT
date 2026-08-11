@@ -1,4 +1,3 @@
-import json
 import sys
 from pathlib import Path
 from time import sleep
@@ -7,6 +6,13 @@ from loguru import logger
 
 import config
 from adapters.olx.browser_client import BrowserClient, LoginRequiredError
+from core.accounts import (
+    account_profile_dir,
+    account_proxy,
+    active_account,
+    load_settings,
+    read_marker,
+)
 from core.message_handler import MessageHandler
 
 
@@ -18,47 +24,11 @@ def setup_logging() -> None:
                rotation="10 MB", retention="14 days", encoding="utf-8")
 
 
-def _settings(account_id: str | None) -> dict:
-    """Setarile efective: globale (data/settings.json) + suprascrierile
-    contului (data/accounts/<id>/settings.json) — aceeasi imbinare ca in
-    dashboard, ca `python main.py` sa respecte ce ai ales acolo."""
-    merged: dict = {}
-    paths = [Path("data/settings.json")]
-    if account_id:
-        paths.append(Path("data/accounts") / account_id / "settings.json")
-    for settings_path in paths:
-        if settings_path.exists():
-            merged.update(json.loads(settings_path.read_text(encoding="utf-8")))
-    return merged
-
-
-def _active_account() -> tuple[str | None, str, dict]:
-    """(account_id, profile_dir, marker) pentru contul activ din
-    data/accounts.json.
-
-    Acelasi registru de conturi ca dashboard-ul, ca `python main.py` sa
-    porneasca pe contul selectat acolo, nu pe profilul vechi unic.
-    """
-    accounts_path = Path("data/accounts.json")
-    if accounts_path.exists():
-        data = json.loads(accounts_path.read_text(encoding="utf-8"))
-        account = next(
-            (a for a in data.get("accounts", []) if a["id"] == data.get("active")),
-            None,
-        )
-        if account:
-            marker = {}
-            marker_path = Path(account["profile_dir"]) / "olx_session.json"
-            if marker_path.exists():
-                marker = json.loads(marker_path.read_text(encoding="utf-8"))
-            return account["id"], account["profile_dir"], marker
-    return None, "data/browser_profile", {}
-
-
 def main() -> None:
     setup_logging()
-    account_id, profile_dir, marker = _active_account()
-    settings = _settings(account_id)
+    account = active_account()
+    account_id = account["id"] if account else None
+    settings = load_settings(account)
     poll_interval = int(
         settings.get("poll_interval_seconds") or config.POLL_INTERVAL_SECONDS
     )
@@ -70,14 +40,24 @@ def main() -> None:
         llm=config.build_llm(settings),
         storage=storage,
         embeddings=config.build_embeddings(),
+        # locatie/livrare/plata — fara asta botul nu putea raspunde la
+        # intrebari de vanzator cand niciun produs nu se potrivea (bug:
+        # main.py era singura cale de pornire care omitea seller_info,
+        # spre deosebire de BotRunner din server.py si de bot_worker.py)
+        seller=settings.get("seller_info"),
     )
+    marker = read_marker(account) if account else {}
     browser = BrowserClient(
         email=config.OLX_EMAIL,
         password=config.OLX_PASSWORD,
-        profile_dir=profile_dir,
+        profile_dir=account_profile_dir(account) if account else "data/browser_profile",
         chat_url=marker.get("chat_url")
         or settings.get("olx_chat_url")
         or "https://www.olx.ro/myaccount/answers/",
+        # fara asta, `python main.py` iesea mereu pe IP-ul masinii chiar
+        # daca ai configurat un proxy pentru cont din dashboard — celelalte
+        # doua cai de pornire (server.py, bot_worker.py) il foloseau deja
+        proxy=account_proxy(account) if account else None,
     )
 
     try:
@@ -109,7 +89,7 @@ def main() -> None:
             # recitit la fiecare ciclu — schimbarea din dashboard se aplica
             # din mers, la fel ca in server.py
             poll_interval = int(
-                _settings(account_id).get("poll_interval_seconds")
+                load_settings(account).get("poll_interval_seconds")
                 or config.POLL_INTERVAL_SECONDS
             )
             sleep(poll_interval)

@@ -13,6 +13,7 @@ from core.product_matcher import match_product
 from core.product_schema import describe_vat, migrate_product
 from core.prompt_builder import build_system_prompt, build_user_prompt
 from core.response_formatter import fallback_response, format_response
+from core.seller_info import answer as answer_seller
 
 
 def _normalize_question(text: str) -> str:
@@ -187,11 +188,15 @@ class MessageHandler:
         )
 
         if product is None:
-            logger.warning("Niciun produs potrivit — folosesc fallback.")
-            response = fallback_response(
-                avoid=last_response,
-                category=detect_category(buyer_message, self.faq_matcher),
-            )
+            seller_answer = answer_seller(buyer_message, self.seller)
+            if seller_answer is not None:
+                response = format_response(seller_answer, avoid=last_response)
+            else:
+                logger.warning("Niciun produs potrivit — folosesc fallback.")
+                response = fallback_response(
+                    avoid=last_response,
+                    category=detect_category(buyer_message, self.faq_matcher),
+                )
         elif stock_answer is not None:
             response = format_response(stock_answer, avoid=last_response)
         else:

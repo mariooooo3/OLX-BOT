@@ -21,13 +21,30 @@ DEFAULT_URL = "sqlite:///data/olxbot.db"
 # deci bazele existente primesc coloanele noi aici (ADD COLUMN e suportat
 # identic de SQLite si PostgreSQL)
 _SCHEMA_UPGRADES = {
+    "products": {
+        "account_id": "VARCHAR(64)",
+    },
     "conversations": {
         "buyer_name": "VARCHAR(200)",
         "ad_title": "VARCHAR(500)",
+        "account_id": "VARCHAR(64)",
+    },
+    "finance_transactions": {
+        "account_id": "VARCHAR(64)",
+        # lipsea complet din schema initiala — DBAdapter nu salva NICIODATA
+        # moneda tranzactiei (doar JSONAdapter o facea), deci "inghetarea"
+        # monedei la momentul inregistrarii (vezi server.py) nu functiona
+        # pe backend-ul db: raportul cadea mereu pe moneda curenta a
+        # produsului, nu pe cea reala de la data tranzactiei
+        "currency": "VARCHAR(8)",
     },
     "jobs": {
         "buyer_name": "VARCHAR(200)",
         "ad_title": "VARCHAR(500)",
+        "account_id": "VARCHAR(64)",
+    },
+    "orders": {
+        "account_id": "VARCHAR(64)",
     },
 }
 

@@ -4,7 +4,9 @@ Erorile sunt per cont: fiecare BotRunner isi tine propriile incidente, iar
 flota le aduna pentru dashboard, cele mai noi primele.
 """
 import unittest
+from unittest.mock import patch
 
+import server
 from server import BotFleet, BotRunner
 
 
@@ -63,6 +65,47 @@ class ErrorCenterTests(unittest.TestCase):
         status = runner.status()
         self.assertEqual(status["account_id"], "acc_test")
         self.assertFalse(status["running"])
+
+
+class DBMultiAccountTests(unittest.TestCase):
+    """Backendul db separa datele pe conturi (account_id pe fiecare rand —
+    vezi adapters/storage/db_adapter.py), deci mai multe conturi pot rula
+    simultan si pe db, nu doar pe json. Fostele teste de-aici verificau
+    restrictia veche (respingere la al doilea cont pe db); acum verificam
+    opusul — ca pornirea NU mai e blocata."""
+
+    def test_start_connected_allows_multiple_db_accounts(self) -> None:
+        accounts = {
+            "active": "acc_unu",
+            "accounts": [
+                {"id": "acc_unu", "label": "Unu", "profile_dir": "profil_unu"},
+                {"id": "acc_doi", "label": "Doi", "profile_dir": "profil_doi"},
+            ],
+        }
+        fleet = BotFleet()
+
+        with (
+            patch.object(server.config, "STORAGE_BACKEND", "db"),
+            patch("server.load_accounts", return_value=accounts),
+            patch("server.account_connected", return_value=True),
+            patch.object(BotRunner, "start") as start,
+        ):
+            started = fleet.start_connected()
+
+        self.assertEqual(set(started), {"acc_unu", "acc_doi"})
+        self.assertEqual(start.call_count, 2)
+
+    def test_start_account_allows_second_db_account(self) -> None:
+        fleet = BotFleet()
+
+        with (
+            patch.object(server.config, "STORAGE_BACKEND", "db"),
+            patch.object(fleet, "running_ids", return_value={"acc_unu"}),
+            patch.object(BotRunner, "start") as start,
+        ):
+            fleet.start_account("acc_doi")  # nu ridica nimic
+
+        start.assert_called_once()
 
 
 if __name__ == "__main__":

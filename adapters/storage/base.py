@@ -24,6 +24,22 @@ class BaseStorageAdapter(ABC):
     ) -> None:
         """Actualizeaza ultima incercare pentru mesaj la pending/sent/failed."""
 
+    @abstractmethod
+    def get_finance_transactions(self, product_id: str | None = None) -> list:
+        """Miscarile din gestiune (achizitii, vanzari, costuri).
+
+        Cu `product_id`, doar cele ale produsului. Declarate aici ca un
+        adaptor nou sa nu le poata omite tacit.
+        """
+
+    @abstractmethod
+    def save_finance_transaction(self, transaction: dict) -> dict:
+        """Adauga sau actualizeaza o miscare (dupa id)."""
+
+    @abstractmethod
+    def delete_finance_transaction(self, transaction_id: str) -> None:
+        """Sterge o miscare din gestiune."""
+
 
 class BaseJobQueue(ABC):
     """Contract pentru coada de joburi (MVP2 — scalare cu workeri separati).

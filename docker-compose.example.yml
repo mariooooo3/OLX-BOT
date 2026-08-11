@@ -1,0 +1,87 @@
+# Un container per cont OLX — fiecare cu propriul proxy/VPN de iesire, ca
+# sa nu mai iasa toate conturile pe acelasi IP (motivul intreg al acestei
+# configuratii — vezi bot_worker.py).
+#
+# Dashboard-ul (server.py + UI) NU e aici — ramane pornit pe Windows, ca
+# pana acum (start.bat). Containerele de mai jos inlocuiesc DOAR bucla de
+# polling a conturilor pe care alegi sa le muti aici; restul conturilor pot
+# continua sa ruleze ca thread, din dashboard, exact ca inainte.
+#
+# Folosire:
+#   1. Copiaza fisierul: cp docker-compose.example.yml docker-compose.yml
+#   2. Inlocuieste "acc_xxxxxx" cu id-urile reale din data/accounts.json
+#      (le vezi si in dashboard, la fiecare cont).
+#   3. Contul trebuie sa fie deja CONECTAT (login facut din dashboard) si
+#      OPRIT acolo (comutatorul din dashboard pe "oprit") inainte sa pornesti
+#      containerul lui — Chromium nu accepta doua procese pe acelasi profil.
+#   4. docker compose up -d acc_1        # porneste doar contul asta
+#      docker compose up -d              # porneste toate serviciile definite
+#      docker compose stop acc_1         # opreste doar contul asta
+#      docker compose logs -f acc_1      # urmareste ce face botul
+#
+# Dashboard-ul arata automat starea (running/last_poll/erori) pentru
+# conturile pornite asa — citeste heartbeat-ul scris de bot_worker.py in
+# data/accounts/<id>/bot_status.json, acelasi folder montat mai jos.
+
+services:
+  acc_1:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: olx-bot-acc_1
+    environment:
+      - ACCOUNT_ID=acc_xxxxxx   # <- id-ul real din data/accounts.json
+      # cheia Groq (sau alte variabile din .env) — fie le pui direct aici,
+      # fie mosteneste tot fisierul .env cu linia de mai jos:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+    env_file:
+      - .env
+    volumes:
+      # tot folderul data/ — profilul de browser, produsele, conversatiile
+      # si accounts.json (ca sa stie eticheta/proxy-ul contului). Acelasi
+      # folder pe care il citeste si dashboard-ul, deci nu e nevoie de nicio
+      # sincronizare intre container si dashboard.
+      - ./data:/app/data
+    restart: unless-stopped
+    # vezi generate_docker_compose.py — fara asta, Docker omoara containerul
+    # cu SIGKILL dupa 10s daca oprirea prinde botul in mijlocul unei
+    # operatii Playwright, si heartbeat-ul final nu mai apuca sa se scrie
+    stop_grace_period: 60s
+    # fara asta, log-urile cresc nelimitat pe termen lung (saptamani/luni)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # cate un cont = un IP diferit, ca sa nu mai fie usor de corelat intre
+    # ele. Alege UNA din variante:
+    #
+    # A) proxy HTTP/SOCKS5 (deja suportat, fara nimic in plus aici) — vezi
+    #    campul "proxy" al contului, setat din dashboard (buton "Proxy" din
+    #    panoul de conturi). Containerul il citeste singur din accounts.json,
+    #    nu trebuie configurat separat in acest fisier.
+    #
+    # B) VPN la nivel de container (WireGuard) — necesita capabilitati de
+    #    retea suplimentare; decomenteaza:
+    # cap_add:
+    #   - NET_ADMIN
+    # devices:
+    #   - /dev/net/tun
+
+  acc_2:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: olx-bot-acc_2
+    environment:
+      - ACCOUNT_ID=acc_yyyyyy   # <- alt id, alt cont
+      - GROQ_API_KEY=${GROQ_API_KEY}
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  # adauga cate un serviciu "acc_N" pentru fiecare cont pe care vrei sa-l
+  # muti din dashboard in container — copiaza blocul de mai sus si schimba
+  # doar numele serviciului + ACCOUNT_ID.

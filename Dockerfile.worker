@@ -1,0 +1,36 @@
+# Imagine pentru bot_worker.py — bucla de polling a UNUI cont OLX,
+# ca proces separat (vezi bot_worker.py pentru motivul intreg).
+#
+# Baza oficiala Playwright vine cu toate dependintele de SISTEM ale
+# Chromium deja instalate — evitam sa reconstruim manual lista de pachete
+# apt (sursa frecventa de erori greu de diagnosticat intr-un container).
+#
+# De ce "playwright install chromium" DUPA pip install, aici in Dockerfile:
+# requirements.txt nu fixeaza versiunea de playwright, deci pip poate
+# instala o versiune mai noua decat cea pentru care imaginea de baza are
+# deja binarul de Chromium descarcat (verificat: se intampla in practica —
+# imaginea are Playwright 1.49, pip instaleaza 1.62). Fara randul de mai
+# jos, containerul descoperea nepotrivirea abia LA PORNIRE si redescarca
+# Chromium de fiecare data cand containerul e recreat (nu doar oprit/pornit)
+# — minute in plus si un mesaj de alarma in loguri de fiecare data. Aici,
+# la build, se instaleaza mereu binarul care CHIAR corespunde versiunii pip
+# instalate, o singura data, in imagine.
+#
+# Build:  docker build -f Dockerfile.worker -t olx-bot-worker .
+# Rulare: vezi docker-compose.example.yml (seteaza ACCOUNT_ID + monteaza data/)
+FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+ && playwright install chromium --with-deps
+
+# codul din core/ si adapters/ e comun cu dashboard-ul (server.py) — imaginea
+# il copiaza pe tot, dar containerul ruleaza DOAR bot_worker.py; server.py
+# si ui/ nu sunt folosite aici (dashboard-ul ramane pe host, vezi README)
+COPY . .
+
+# fara CMD implicit — ACCOUNT_ID e obligatoriu si vine din docker-compose,
+# ca o greseala de configurare sa pice devreme si clar, nu tacit
+ENTRYPOINT ["python", "bot_worker.py"]

@@ -5,8 +5,10 @@ Rulare:  python test_faq_matching.py
 """
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import config
 from adapters.llm.base import BaseLLMAdapter
 from adapters.storage.json_adapter import JSONAdapter
 from core.fallback_catalog import CATEGORIES, detect_category
@@ -33,6 +35,26 @@ class MockEmbeddings:
             norm = sum(x * x for x in vec) ** 0.5 or 1.0
             vectors.append([x / norm for x in vec])
         return vectors
+
+
+class SharedEmbeddingsTests(unittest.TestCase):
+    def test_disabled_embeddings_still_return_none(self):
+        original_backend = config.EMBEDDINGS_BACKEND
+        try:
+            config.EMBEDDINGS_BACKEND = "off"
+            self.assertIsNone(config.build_embeddings())
+        finally:
+            config.EMBEDDINGS_BACKEND = original_backend
+
+    @unittest.skipIf(
+        config.EMBEDDINGS_BACKEND in ("off", "none", "false", "0"),
+        "Embeddings sunt dezactivate.",
+    )
+    def test_two_accounts_share_one_embeddings_adapter(self):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            adapters = list(pool.map(lambda _account: config.build_embeddings(), range(8)))
+
+        self.assertEqual(len({id(adapter) for adapter in adapters}), 1)
 
 
 class RecordingLLM(BaseLLMAdapter):

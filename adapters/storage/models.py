@@ -3,10 +3,15 @@
 Aceleasi campuri ca schemele JSON din MVP1, ca trecerea JSON -> DB sa nu
 schimbe nimic in core/. Campurile imbricate (attributes, faq, shipping,
 keywords) sunt coloane JSON — merg identic pe SQLite si PostgreSQL.
+
+`account_id` (nullable) separa datele mai multor conturi OLX in acelasi DB —
+vezi adapters/storage/db_adapter.py. Nullable ca sa ramana compatibil cu
+instalarile vechi, dintr-un singur cont (fara account_id, DBAdapter se
+comporta exact ca inainte — vede tot, fara filtrare).
 """
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, Integer, JSON, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -22,6 +27,7 @@ class Product(Base):
     __tablename__ = "products"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(500))
     category: Mapped[str] = mapped_column(String(120), default="")
     subcategory: Mapped[str] = mapped_column(String(120), default="")
@@ -38,6 +44,7 @@ class Product(Base):
     def to_dict(self) -> dict:
         return {
             "id": self.id,
+            "account_id": self.account_id,
             "title": self.title,
             "category": self.category,
             "subcategory": self.subcategory,
@@ -57,6 +64,7 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     olx_conversation_id: Mapped[str] = mapped_column(String(128), index=True)
     product_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     timestamp: Mapped[str] = mapped_column(String(32))
@@ -69,6 +77,7 @@ class Conversation(Base):
     def to_dict(self) -> dict:
         return {
             "id": self.id,
+            "account_id": self.account_id,
             "olx_conversation_id": self.olx_conversation_id,
             "product_id": self.product_id,
             "timestamp": self.timestamp,
@@ -77,6 +86,43 @@ class Conversation(Base):
             "status": self.status,
             "buyer_name": self.buyer_name,
             "ad_title": self.ad_title,
+        }
+
+
+class FinanceTransaction(Base):
+    """O miscare financiara asociata unui produs din catalog."""
+
+    __tablename__ = "finance_transactions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    product_id: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)
+    currency: Mapped[str] = mapped_column(String(8), default="RON")
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+    unit_price: Mapped[float] = mapped_column(Float, default=0)
+    vat_rate: Mapped[float] = mapped_column(Float, default=0)
+    vat_included: Mapped[bool] = mapped_column(Boolean, default=False)
+    vat_deductible: Mapped[bool] = mapped_column(Boolean, default=False)
+    occurred_at: Mapped[str] = mapped_column(String(10), index=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[str] = mapped_column(String(40), default="")
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "account_id": self.account_id,
+            "product_id": self.product_id,
+            "kind": self.kind,
+            "currency": self.currency,
+            "quantity": self.quantity,
+            "unit_price": self.unit_price,
+            "vat_rate": self.vat_rate,
+            "vat_included": self.vat_included,
+            "vat_deductible": self.vat_deductible,
+            "occurred_at": self.occurred_at,
+            "note": self.note,
+            "created_at": self.created_at,
         }
 
 
@@ -92,6 +138,7 @@ class Job(Base):
     __tablename__ = "jobs"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     olx_conversation_id: Mapped[str] = mapped_column(String(128), index=True)
     buyer_message: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
@@ -109,6 +156,7 @@ class Job(Base):
     def to_dict(self) -> dict:
         return {
             "id": self.id,
+            "account_id": self.account_id,
             "olx_conversation_id": self.olx_conversation_id,
             "buyer_message": self.buyer_message,
             "status": self.status,
@@ -131,6 +179,7 @@ class Order(Base):
     __tablename__ = "orders"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     product_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     olx_conversation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     buyer_name: Mapped[str] = mapped_column(String(200), default="")
@@ -141,6 +190,7 @@ class Order(Base):
     def to_dict(self) -> dict:
         return {
             "id": self.id,
+            "account_id": self.account_id,
             "product_id": self.product_id,
             "olx_conversation_id": self.olx_conversation_id,
             "buyer_name": self.buyer_name,

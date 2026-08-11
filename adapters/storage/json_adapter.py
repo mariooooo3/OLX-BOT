@@ -1,11 +1,15 @@
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 from loguru import logger
 
 from adapters.storage.base import BaseStorageAdapter
+
+
+_FINANCE_WRITE_LOCK = threading.Lock()
 
 
 class JSONAdapter(BaseStorageAdapter):
@@ -16,6 +20,7 @@ class JSONAdapter(BaseStorageAdapter):
         self.data_dir = Path(data_dir)
         self.products_path = self.data_dir / "products.json"
         self.conversations_path = self.data_dir / "conversations.json"
+        self.finance_path = self.data_dir / "finance_transactions.json"
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
     def get_products(self) -> list:
@@ -47,6 +52,54 @@ class JSONAdapter(BaseStorageAdapter):
         products = [p for p in self.get_products() if p.get("id") != product_id]
         self._write_atomic(self.products_path, {"products": products})
         logger.info("Produs sters: {}", product_id)
+
+    # ------------------------------------------------------------------ #
+    # gestiune financiara
+    # ------------------------------------------------------------------ #
+
+    def get_finance_transactions(self, product_id: str | None = None) -> list:
+        if not self.finance_path.exists():
+            return []
+        with open(self.finance_path, encoding="utf-8") as f:
+            transactions = json.load(f).get("transactions", [])
+        if product_id is None:
+            return transactions
+        return [t for t in transactions if t.get("product_id") == product_id]
+
+    def save_finance_transaction(self, transaction: dict) -> dict:
+        with _FINANCE_WRITE_LOCK:
+            transactions = self.get_finance_transactions()
+            idx = next(
+                (
+                    i
+                    for i, item in enumerate(transactions)
+                    if item.get("id") == transaction.get("id")
+                ),
+                None,
+            )
+            if idx is None:
+                transactions.append(transaction)
+            else:
+                transactions[idx] = transaction
+            self._write_atomic(
+                self.finance_path,
+                {"transactions": transactions},
+            )
+        logger.info("Tranzactie financiara salvata: {}", transaction.get("id"))
+        return transaction
+
+    def delete_finance_transaction(self, transaction_id: str) -> None:
+        with _FINANCE_WRITE_LOCK:
+            transactions = [
+                item
+                for item in self.get_finance_transactions()
+                if item.get("id") != transaction_id
+            ]
+            self._write_atomic(
+                self.finance_path,
+                {"transactions": transactions},
+            )
+        logger.info("Tranzactie financiara stearsa: {}", transaction_id)
 
     def get_conversations(self) -> list:
         """Toate conversatiile logate (folosit de UI)."""

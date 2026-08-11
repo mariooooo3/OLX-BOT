@@ -22,6 +22,8 @@ import hashlib
 import json
 import os
 import re
+import tempfile
+import threading
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +33,7 @@ from loguru import logger
 DIRECT_THRESHOLD = float(os.environ.get("FAQ_DIRECT_THRESHOLD", "0.75"))
 HINT_THRESHOLD = float(os.environ.get("FAQ_HINT_THRESHOLD", "0.55"))
 CACHE_PATH = Path("data/embeddings_cache.json")
+_CACHE_WRITE_LOCK = threading.Lock()
 
 # cuvinte fara continut — nu conteaza la suprapunerea lexicala
 STOPWORDS = {
@@ -140,13 +143,33 @@ class FAQMatcher:
         return self._cache
 
     def _save_cache(self) -> None:
+        tmp_path = None
         try:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self.cache_path.write_text(
-                json.dumps(self._cache), encoding="utf-8"
-            )
+            with _CACHE_WRITE_LOCK:
+                disk_cache = {}
+                if self.cache_path.exists():
+                    try:
+                        disk_cache = json.loads(
+                            self.cache_path.read_text(encoding="utf-8")
+                        )
+                    except Exception:
+                        disk_cache = {}
+                disk_cache.update(self._cache or {})
+                fd, tmp_path = tempfile.mkstemp(
+                    dir=self.cache_path.parent,
+                    suffix=".tmp",
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(disk_cache, f)
+                os.replace(tmp_path, self.cache_path)
+                tmp_path = None
+                self._cache = disk_cache
         except Exception as e:
             logger.debug("Nu am putut salva cache-ul de embeddings: {}", e)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     def _embed_cached(self, texts: list[str]) -> list[list[float]] | None:
         """Embeddings cu cache pe disc; None daca modelul nu e disponibil."""

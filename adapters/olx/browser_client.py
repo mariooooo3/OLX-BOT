@@ -31,6 +31,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from adapters.olx.session_check import dom_logged_in, fetch_me
 from core.faq_matcher import normalize_text
+from core.fingerprint import init_script_for, profile_for
 from core.response_formatter import sanitize_response
 
 BASE_URL = "https://www.olx.ro"
@@ -115,6 +116,7 @@ class BrowserClient:
         profile_dir: str | Path = "data/browser_profile",
         chat_url: str = DEFAULT_CHAT_URL,
         headless: bool = True,
+        proxy: dict | None = None,
     ):
         # email/password pastrate doar pentru compatibilitate; login-ul real
         # se face manual (CAPTCHA), nu cu credentialele de aici.
@@ -123,6 +125,11 @@ class BrowserClient:
         self.profile_dir = Path(profile_dir)
         self.chat_url = chat_url
         self.headless = headless
+        # {"server": "http://host:port" | "socks5://host:port", "username"?, "password"?}
+        # Fiecare cont poate iesi pe alt IP — mai multe conturi OLX din
+        # acelasi browser/masina, cu acelasi IP, sunt usor de corelat de
+        # sistemele anti-frauda OLX (vezi motivul in accounts.json/server.py).
+        self.proxy = proxy
         self._playwright = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
@@ -170,13 +177,30 @@ class BrowserClient:
         logger.info("Sesiune OLX valida — sunt logat.")
 
     def _launch_context(self) -> BrowserContext:
-        return self._playwright.chromium.launch_persistent_context(
+        # amprenta e determinata de profile_dir, nu aleasa aici — vezi
+        # core/fingerprint.py: acelasi profil (deci acelasi cont) primeste
+        # mereu aceeasi amprenta, in orice proces (dashboard, container,
+        # fereastra de login manual), ca sesiunea sa para acelasi dispozitiv
+        fingerprint = profile_for(self.profile_dir)
+        kwargs = dict(
             user_data_dir=str(self.profile_dir),
             headless=self.headless,
             locale="ro-RO",
-            viewport={"width": 1366, "height": 850},
+            timezone_id="Europe/Bucharest",
+            viewport=fingerprint["viewport"],
+            user_agent=fingerprint["user_agent"],
+            device_scale_factor=fingerprint["device_scale_factor"],
             args=["--disable-blink-features=AutomationControlled"],
         )
+        if self.proxy and self.proxy.get("server"):
+            kwargs["proxy"] = {
+                k: v for k, v in self.proxy.items()
+                if k in ("server", "username", "password") and v
+            }
+            logger.info("Ies prin proxy: {}", self.proxy["server"])
+        context = self._playwright.chromium.launch_persistent_context(**kwargs)
+        context.add_init_script(init_script_for(self.profile_dir))
+        return context
 
     def stop(self) -> None:
         """Idempotent si tolerant la un browser deja crapat, ca procesul
