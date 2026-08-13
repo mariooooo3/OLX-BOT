@@ -169,11 +169,13 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
     onSuccess: (data) => {
       invalidate();
       setProxyTarget(null);
-      toast.success(
-        data.has_proxy
-          ? "Proxy salvat — se aplică la următoarea pornire a botului pe acest cont"
-          : "Proxy șters — contul iese direct la următoarea pornire",
-      );
+      const restartNote =
+        data.restarted === "thread"
+          ? " — botul s-a repornit automat, se aplică deja"
+          : data.restarted === "docker"
+            ? " — containerul se repornește automat, se aplică imediat ce pornește"
+            : " — se aplică la următoarea pornire a botului pe acest cont";
+      toast.success((data.has_proxy ? "Proxy salvat" : "Proxy șters") + restartNote);
     },
     onError: () => toast.error("Nu am putut salva proxy-ul"),
   });
@@ -383,8 +385,8 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
             <DialogDescription>
               Contul iese pe internet prin acest proxy/VPN în loc de IP-ul mașinii. Util când ai mai
               multe conturi OLX pe același calculator — IP diferit per cont, mai greu de corelat.
-              Lasă adresa goală ca să ștergi proxy-ul. Se aplică de la următoarea pornire a botului
-              pe acest cont.
+              Lasă adresa goală ca să ștergi proxy-ul. Dacă botul acestui cont rulează deja, se
+              repornește automat ca să preia noul proxy — nu trebuie să faci nimic în plus.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">

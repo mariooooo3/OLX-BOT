@@ -2,6 +2,7 @@
 import unittest
 
 from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from adapters.olx.browser_client import BrowserClient
 
@@ -34,7 +35,12 @@ class BrowserPipelineTests(unittest.TestCase):
 
             @staticmethod
             def wait_for_selector(*_args, **_kwargs) -> None:
-                raise TimeoutError
+                # Playwright real ridica exact tipul asta la timeout — nu
+                # builtin TimeoutError. get_new_messages() prinde specific
+                # PlaywrightTimeoutError in _ensure_selling_tab(); un
+                # TimeoutError generic ar scapa necaptat, ca in bug-ul
+                # reprodus aici inainte de fix.
+                raise PlaywrightTimeoutError("timeout")
 
             @staticmethod
             def query_selector_all(_selector: str) -> list:
@@ -95,8 +101,36 @@ class BrowserPipelineTests(unittest.TestCase):
         )
 
     def test_send_reply_removes_dashes_at_olx_boundary(self) -> None:
+        class RecordingLocator:
+            """Simuleaza Locator-ul casetei de raspuns (vezi _reply_box /
+            _write_reply): scrierea se face prin press_sequentially, nu
+            prin fill(), iar succesul se confirma prin input_value()."""
+
+            filled_text = ""
+
+            def count(self) -> int:
+                return 1
+
+            @property
+            def first(self) -> "RecordingLocator":
+                return self
+
+            def click(self) -> None:
+                pass
+
+            def press(self, key: str) -> None:
+                if key == "Backspace":
+                    self.filled_text = ""
+
+            def press_sequentially(self, text: str, delay: float | None = None) -> None:
+                self.filled_text = text
+
+            def input_value(self) -> str:
+                return self.filled_text
+
         class RecordingPage:
-            filled_text = None
+            def __init__(self) -> None:
+                self.box = RecordingLocator()
 
             @staticmethod
             def goto(*_args, **_kwargs) -> None:
@@ -106,8 +140,8 @@ class BrowserPipelineTests(unittest.TestCase):
             def wait_for_selector(*_args, **_kwargs) -> None:
                 pass
 
-            def fill(self, _selector: str, text: str) -> None:
-                self.filled_text = text
+            def locator(self, _selector: str) -> RecordingLocator:
+                return self.box
 
             @staticmethod
             def click(*_args, **_kwargs) -> None:
@@ -119,7 +153,7 @@ class BrowserPipelineTests(unittest.TestCase):
 
         self.client.send_reply("conversation-active", "Da -- sigur — este disponibil.")
 
-        self.assertEqual(page.filled_text, "Da sigur este disponibil.")
+        self.assertEqual(page.box.filled_text, "Da sigur este disponibil.")
 
 
 if __name__ == "__main__":

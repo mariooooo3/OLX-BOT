@@ -82,11 +82,61 @@ Se deschide automat dashboard-ul în browser la `http://localhost:8080`.
 > original nu se partajează. Datele (produse, conversații, sesiunea de
 > login) rămân locale pe calculatorul respectiv și nu ajung pe git.
 
-## Mai multe conturi, fiecare cu IP propriu
+## Mai multe conturi, fiecare cu IP propriu (proxy + Docker)
 
-Cu mai multe conturi OLX pe același calculator, poți da fiecăruia propriul
-proxy de ieșire (buton „Proxy" din panoul de conturi) și, opțional, propriul
-container Docker — vezi [docs/docker-multi-cont.md](docs/docker-multi-cont.md).
+### De ce ai nevoie de asta
+
+Dacă rulezi mai multe conturi OLX pe același calculator, toate ies pe
+internet cu **același IP** — al mașinii tale. Sistemele anti-fraudă ale OLX
+pot corela ușor conturi diferite care vin mereu de pe același IP și le pot
+limita sau bloca. Soluția: fiecare cont iese pe **propriul IP**, printr-un
+proxy dedicat lui.
+
+### Ce se automatizează singur (nu ai nimic de făcut)
+
+- **Amprenta de browser** — fiecare cont primește automat propriul
+  user-agent, rezoluție de ecran și placă video „raportată", mereu aceeași
+  pentru același cont, diferită față de celelalte conturi. Se aplică oriunde
+  rulează botul (dashboard, container Docker, fereastra de login).
+- **Aplicarea proxy-ului** — odată ce ai lipit adresa în dashboard, botul
+  (sau containerul lui Docker, dacă îl folosești) **se repornește automat**
+  și preia noul proxy imediat. Nu trebuie să opreşti/porneşti nimic manual.
+- **Fișierul `docker-compose.yml`** — dacă alegi să muți un cont în Docker,
+  fișierul se generează/actualizează singur din contul tău, la un click.
+
+### Ce trebuie să faci tu, pas cu pas
+
+1. **Cumpără/obține un proxy** (SOCKS5 sau HTTP) pentru fiecare cont OLX pe
+   care vrei să-l izolezi — de la un furnizor de proxy dedicat (nu un VPN
+   obișnuit de tip NordVPN; ai nevoie de o adresă `host:port` + user/parolă,
+   gândită pentru automatizare, nu pentru un singur utilizator uman).
+2. În dashboard, din panoul de conturi, apasă **„Proxy"** pe contul dorit și
+   completează adresa (`socks5://host:port` sau `http://host:port`) +
+   utilizator/parolă, dacă proxy-ul le cere.
+3. Apasă **Salvează**. Atât — dacă botul acelui cont rulează deja (local sau
+   în container Docker), se repornește singur și iese imediat prin noul
+   proxy. Dacă nu rulează încă, proxy-ul se aplică automat la prima pornire.
+4. (Opțional) Dacă vrei izolare completă și la nivel de proces, nu doar de
+   rețea, apasă **„Pornește în Docker"** pe acel cont — fiecare cont mutat în
+   Docker rulează într-un container separat, cu propriul lui ciclu de viață,
+   independent de celelalte. Detalii și pornire din linia de comandă:
+   [docs/docker-multi-cont.md](docs/docker-multi-cont.md).
+
+> **Login-ul (cu CAPTCHA) se face mereu din dashboard, pe Windows** — nu din
+> container. Dacă vrei ca sesiunea de login și botul să iasă pe același IP
+> (recomandat), setează proxy-ul contului **înainte** de a apăsa
+> „Conectează cont OLX".
+
+### Atenție — folosește mereu ACELAȘI proxy pentru un cont
+
+Odată ce ai atribuit un proxy unui cont, **nu-l schimba** și nu-l lăsa să se
+rotească între adrese diferite (unele servicii de proxy fac asta automat
+"pentru anonimitate" — evită genul ăsta pentru boți). Sesiunea de login s-a
+creat pe IP-ul respectiv; dacă botul începe brusc să vină de pe alt IP,
+sistemele anti-fraudă OLX pot trata schimbarea ca pe un semnal suspect —
+exact genul de corelare pe care proxy-ul încearcă să-l evite — și pot duce
+la limitarea sau interzicerea contului. Regula simplă: **un cont OLX = un
+proxy fix, tot timpul**.
 
 ## Probleme frecvente
 

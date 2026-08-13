@@ -1197,10 +1197,11 @@ def add_olx_account(body: dict | None = None):
 def set_account_proxy(account_id: str, body: dict):
     """Configureaza sau sterge proxy-ul de iesire al contului.
 
-    Corp gol / fara `server` = sterge proxy-ul (contul iese direct). Se aplica
-    de la urmatoarea pornire a botului (sau a ferestrei de login) pe acest
-    cont — un cont deja pornit tine contextul de browser deschis cu proxy-ul
-    vechi pana la restart.
+    Corp gol / fara `server` = sterge proxy-ul (contul iese direct). Un
+    context de browser deja deschis (thread local sau container Docker) tine
+    proxy-ul vechi pana la restart — asa ca daca botul acestui cont ruleaza
+    deja, il repornim automat aici, ca userul sa nu mai aiba nimic de facut
+    dupa ce salveaza adresa: "pui proxy-ul si atat".
     """
     accounts = load_accounts()
     account = find_account(accounts, account_id)
@@ -1227,7 +1228,41 @@ def set_account_proxy(account_id: str, body: dict):
         "configurat" if server_url else "sters",
         account_display_name(account),
     )
-    return {"ok": True, "account_id": account_id, "has_proxy": bool(server_url)}
+
+    restarted: str | None = None
+    runner = fleet.get(account_id)
+    if runner.running:
+        # thread local: oprim si repornim cu contextul de browser nou —
+        # preia imediat proxy-ul (sau lipsa lui) tocmai salvat
+        try:
+            fleet.stop_account(account_id, wait=True)
+            fleet.start_account(account_id)
+            restarted = "thread"
+        except Exception as e:
+            logger.warning(
+                "Repornirea automata dupa schimbarea proxy-ului a esuat pentru {}: {}",
+                account_display_name(account), e,
+            )
+    else:
+        heartbeat = read_bot_heartbeat(account_id)
+        if heartbeat and heartbeat.get("running") and _docker_available()["available"]:
+            with _docker_jobs_lock:
+                existing_job = _docker_jobs.get(account_id)
+                if not existing_job or existing_job.get("done"):
+                    _docker_jobs[account_id] = {
+                        "step": "în așteptare...", "done": False, "error": None, "log_tail": "",
+                    }
+                    threading.Thread(
+                        target=_run_docker_restart, args=(account_id,), daemon=True
+                    ).start()
+                    restarted = "docker"
+
+    return {
+        "ok": True,
+        "account_id": account_id,
+        "has_proxy": bool(server_url),
+        "restarted": restarted,
+    }
 
 
 # --------------------------------------------------------------------- #

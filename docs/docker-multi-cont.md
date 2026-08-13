@@ -124,9 +124,11 @@ etc.).
 - **Dacă schimbi setările contului din dashboard** (model LLM, interval de
   polling, informații vânzător), containerul le preia automat la următorul
   ciclu — citește din același `data/accounts/<id>/settings.json`.
-- **Dacă schimbi proxy-ul unui cont care rulează deja în container**,
-  repornește containerul (`docker compose restart acc_1`) — proxy-ul se
-  aplică doar la pornirea browserului.
+- **Dacă schimbi proxy-ul unui cont** din dashboard, iar botul lui rulează
+  deja (thread local sau container Docker), serverul îl repornește automat
+  — proxy-ul nou se aplică imediat, nu trebuie repornit manual. Dacă
+  preferi linia de comandă, `docker compose restart acc_1` face același
+  lucru pentru varianta container.
 - IP diferit (proxy) + amprentă de browser diferită (automat) reduc mult
   riscul de corelare, dar nu-l elimină 100%: rămân semnale pe care nu le
   controlăm din browser (ex. amprenta la nivel de rețea a proxy-ului

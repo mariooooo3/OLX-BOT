@@ -257,14 +257,15 @@ export async function addOlxAccount(label?: string): Promise<{ id: string; label
 
 /**
  * Configureaza (sau, cu `server` gol, sterge) proxy-ul de iesire al contului.
- * Se aplica de la urmatoarea pornire a botului / fereastra de login pe acest
- * cont — un cont deja pornit pastreaza proxy-ul cu care a fost lansat.
+ * Daca botul acestui cont ruleaza deja (thread local sau container Docker),
+ * serverul il repornește automat — `restarted` spune cum ("thread" | "docker"
+ * | null daca botul nu rula, deci nu era nimic de repornit).
  */
 export async function setAccountProxy(
   accountId: string,
   proxy: { server: string; username?: string; password?: string },
-): Promise<{ ok: boolean; has_proxy: boolean }> {
-  return request<{ ok: boolean; has_proxy: boolean }>(
+): Promise<{ ok: boolean; has_proxy: boolean; restarted: "thread" | "docker" | null }> {
+  return request<{ ok: boolean; has_proxy: boolean; restarted: "thread" | "docker" | null }>(
     `/api/olx/accounts/${encodeURIComponent(accountId)}/proxy`,
     { method: "PUT", body: JSON.stringify(proxy) },
   );
