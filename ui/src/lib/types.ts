@@ -262,3 +262,98 @@ export interface PullJob {
   done: boolean;
   error: string | null;
 }
+
+export interface SuspiciousSignal {
+  kind: "title" | "price" | "terms";
+  weight: number;
+  text: string;
+}
+
+export interface SuspiciousListing {
+  id: string;
+  title: string;
+  url: string;
+  price: number | null;
+  currency: string;
+  description: string;
+  status: "de_verificat" | "verificat" | "fals_positiv";
+  created_at: string;
+  score: number;
+  signals: SuspiciousSignal[];
+  explanation: string;
+  reason: string;
+  suggested_message: string;
+}
+
+export interface SuspiciousRules {
+  watched_titles: string;
+  suspicious_terms: string;
+  max_price: number | null;
+  selected_reasons: ("pret_redus" | "plata_avans" | "contact_extern" | "descriere_suspecta")[];
+  reason: string;
+  message_template: string;
+}
+
+export interface SuspiciousListingsData {
+  account_id: string;
+  account_label: string;
+  rules: SuspiciousRules;
+  listings: SuspiciousListing[];
+}
+
+/** Rezultatul unui test de conectivitate prin proxy (catre OLX). */
+export interface ProxyTestResult {
+  ok: boolean;
+  error: string | null;
+  latency_ms: number | null;
+  /** codul de tara (ISO, ex. "RO") al IP-ului de ieșire; null daca geo-lookup-ul a eșuat */
+  country: string | null;
+  /** true cand `country` e cunoscut si diferit de România — bot-ul declara
+   *  mereu locale ro-RO/Europe-Bucharest, deci un proxy din alta tara e
+   *  el insusi un semnal suspect, chiar daca funcționează tehnic */
+  country_mismatch: boolean;
+}
+
+/** Ultimul test rulat pentru un proxy, salvat in registru. */
+export interface ProxyCheck extends ProxyTestResult {
+  checked_at: string;
+}
+
+/**
+ * Rezultatul verificării complete — testul rapid PLUS o încărcare reală
+ * prin Chromium (nu doar `requests`). Un proxy poate trece testul rapid și
+ * totuși să se comporte diferit sub stiva TLS/HTTP a unui browser real.
+ * `browser_ok`/`browser_error`/`browser_latency_ms` rămân null dacă testul
+ * rapid a picat deja (n-are rost să lansăm un browser în plus).
+ */
+export interface ProxyFullTestResult extends ProxyTestResult {
+  browser_ok: boolean | null;
+  browser_error: string | null;
+  browser_latency_ms: number | null;
+}
+
+export interface ProxyFullCheck extends ProxyFullTestResult {
+  checked_at: string;
+}
+
+/**
+ * Un proxy din registrul central (data/proxies.json) — un singur loc de
+ * adevar, ca acelasi proxy sa nu ajunga din greseala pe doua conturi.
+ * Fiecare cont OLX il REFERA prin proxy_id (vezi OlxAccount.proxy_id in
+ * lib/api.ts), nu mai poarta adresa direct.
+ */
+export interface Proxy {
+  id: string;
+  label: string;
+  server: string;
+  username: string | null;
+  /** parola nu se intoarce niciodata in clar — doar daca exista una setata */
+  has_password: boolean;
+  created_at: string;
+  last_check: ProxyCheck | null;
+  /** verificarea completa (buton separat, mai lenta) — vezi ProxyFullCheck */
+  last_full_check: ProxyFullCheck | null;
+  /** contul care il foloseste acum, sau null daca e liber */
+  account_id: string | null;
+  account_label: string | null;
+}

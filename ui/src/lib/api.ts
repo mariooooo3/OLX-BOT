@@ -9,6 +9,12 @@ import type {
   FinanceReport,
   FinanceTransaction,
   FinanceTransactionInput,
+  Proxy,
+  ProxyFullTestResult,
+  ProxyTestResult,
+  SuspiciousListing,
+  SuspiciousListingsData,
+  SuspiciousRules,
 } from "./types";
 
 // Backend-ul FastAPI al botului (server.py). Configurabil prin VITE_API_URL.
@@ -92,6 +98,61 @@ export async function saveFinanceTransaction(
 
 export async function deleteFinanceTransaction(id: string, accountId?: string): Promise<void> {
   await request(`/api/finance/transactions/${encodeURIComponent(id)}${accountScope(accountId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function getSuspiciousListings(accountId?: string): Promise<SuspiciousListingsData> {
+  return request<SuspiciousListingsData>(`/api/suspicious-listings${accountScope(accountId)}`);
+}
+
+export async function saveSuspiciousRules(
+  rules: SuspiciousRules,
+  accountId?: string,
+): Promise<SuspiciousListingsData> {
+  return request<SuspiciousListingsData>(
+    `/api/suspicious-listings/rules${accountScope(accountId)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(rules),
+    },
+  );
+}
+
+export async function addSuspiciousListing(
+  listing: Pick<SuspiciousListing, "title" | "url" | "price" | "currency" | "description">,
+  accountId?: string,
+): Promise<SuspiciousListing> {
+  return request<SuspiciousListing>(`/api/suspicious-listings${accountScope(accountId)}`, {
+    method: "POST",
+    body: JSON.stringify(listing),
+  });
+}
+
+export async function setSuspiciousListingStatus(
+  id: string,
+  status: SuspiciousListing["status"],
+  accountId?: string,
+): Promise<SuspiciousListing> {
+  return request<SuspiciousListing>(
+    `/api/suspicious-listings/${encodeURIComponent(id)}/status${accountScope(accountId)}`,
+    { method: "PUT", body: JSON.stringify({ status }) },
+  );
+}
+
+export async function saveSuspiciousListingMessage(
+  id: string,
+  suggestedMessage: string,
+  accountId?: string,
+): Promise<SuspiciousListing> {
+  return request<SuspiciousListing>(
+    `/api/suspicious-listings/${encodeURIComponent(id)}/message${accountScope(accountId)}`,
+    { method: "PUT", body: JSON.stringify({ suggested_message: suggestedMessage }) },
+  );
+}
+
+export async function deleteSuspiciousListing(id: string, accountId?: string): Promise<void> {
+  await request(`/api/suspicious-listings/${encodeURIComponent(id)}${accountScope(accountId)}`, {
     method: "DELETE",
   });
 }
@@ -217,6 +278,8 @@ export interface OlxAccount {
   active: boolean;
   /** are proxy de iesire configurat (conturi diferite, IP-uri diferite) */
   has_proxy: boolean;
+  /** proxy-ul asignat, din registrul central — vezi getProxies() */
+  proxy_id: string | null;
   /** adresa proxy-ului, fara credentiale — doar de afisat */
   proxy_server: string | null;
   proxy_username: string | null;
@@ -255,20 +318,84 @@ export async function addOlxAccount(label?: string): Promise<{ id: string; label
   });
 }
 
+export interface AssignProxyResult {
+  ok: boolean;
+  has_proxy: boolean;
+  restarted: "thread" | "docker" | null;
+  /** proxy-ul era deja alocat altui cont — a fost mutat aici, iar contul
+   *  vechi a ramas fara proxy (repornit automat daca rula) */
+  moved_from: { account_id: string; account_label: string } | null;
+}
+
 /**
- * Configureaza (sau, cu `server` gol, sterge) proxy-ul de iesire al contului.
- * Daca botul acestui cont ruleaza deja (thread local sau container Docker),
- * serverul il repornește automat — `restarted` spune cum ("thread" | "docker"
- * | null daca botul nu rula, deci nu era nimic de repornit).
+ * Asigneaza (sau, cu `proxyId` null, dezasigneaza) un proxy din registrul
+ * central (vezi getProxies()) contului dat. Daca botul acestui cont ruleaza
+ * deja (thread local sau container Docker), serverul il repornește automat.
  */
 export async function setAccountProxy(
   accountId: string,
-  proxy: { server: string; username?: string; password?: string },
-): Promise<{ ok: boolean; has_proxy: boolean; restarted: "thread" | "docker" | null }> {
-  return request<{ ok: boolean; has_proxy: boolean; restarted: "thread" | "docker" | null }>(
-    `/api/olx/accounts/${encodeURIComponent(accountId)}/proxy`,
-    { method: "PUT", body: JSON.stringify(proxy) },
-  );
+  proxyId: string | null,
+): Promise<AssignProxyResult> {
+  return request<AssignProxyResult>(`/api/olx/accounts/${encodeURIComponent(accountId)}/proxy`, {
+    method: "PUT",
+    body: JSON.stringify({ proxy_id: proxyId }),
+  });
+}
+
+// --------------------------------------------------------------------- //
+// registru de proxy-uri — un singur loc de adevar, ca acelasi proxy sa nu
+// ajunga din greseala pe doua conturi (vezi core/proxies.py)
+// --------------------------------------------------------------------- //
+
+export interface ProxyInput {
+  label?: string;
+  server: string;
+  /** goale la editare = neschimbate (parola nu se intoarce niciodata catre UI) */
+  username?: string;
+  password?: string;
+  /** salveaza chiar daca testul de conectivitate esueaza */
+  skip_validation?: boolean;
+}
+
+export async function getProxies(): Promise<Proxy[]> {
+  return request<Proxy[]>("/api/proxies");
+}
+
+export async function createProxy(
+  input: ProxyInput,
+): Promise<{ proxy: Proxy; test: ProxyTestResult | null }> {
+  return request(`/api/proxies`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function updateProxy(
+  proxyId: string,
+  input: Partial<ProxyInput>,
+): Promise<{ proxy: Proxy; test: ProxyTestResult | null }> {
+  return request(`/api/proxies/${encodeURIComponent(proxyId)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+/** Reruleaza testul de conectivitate al unui proxy deja salvat. */
+export async function testProxy(proxyId: string): Promise<ProxyTestResult> {
+  return request(`/api/proxies/${encodeURIComponent(proxyId)}/test`, { method: "POST" });
+}
+
+/**
+ * Verificare completa, cu Chromium real — mai lenta (~5-15s) decat
+ * testProxy(), dar prinde discrepante intre `requests` si browserul real
+ * (vezi core/proxies.py:test_proxy_full()).
+ */
+export async function testProxyFull(proxyId: string): Promise<ProxyFullTestResult> {
+  return request(`/api/proxies/${encodeURIComponent(proxyId)}/test-full`, { method: "POST" });
+}
+
+/** `force`: sterge chiar daca proxy-ul e alocat unui cont (il dezasigneaza intai). */
+export async function deleteProxy(proxyId: string, force = false): Promise<void> {
+  await request(`/api/proxies/${encodeURIComponent(proxyId)}${force ? "?force=true" : ""}`, {
+    method: "DELETE",
+  });
 }
 
 // --------------------------------------------------------------------- //

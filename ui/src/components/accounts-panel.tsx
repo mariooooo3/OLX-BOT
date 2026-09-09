@@ -10,7 +10,19 @@
  */
 import { useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Box, Globe, KeyRound, Loader2, LogOut, RotateCw, Trash2, UserPlus } from "lucide-react";
+import {
+  Box,
+  Globe,
+  KeyRound,
+  Loader2,
+  LogOut,
+  Plus,
+  RotateCw,
+  ShieldCheck,
+  Trash2,
+  UserPlus,
+  Wifi,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -34,22 +46,29 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
 import { accountDisplayName, useOlxSession } from "@/components/account-menu";
 import { AccountDot } from "@/components/account-scope";
 import {
   addOlxAccount,
+  createProxy,
+  deleteProxy,
   getBotStatus,
   getDockerAccounts,
   getDockerStatus,
+  getProxies,
   restartAccountDocker,
   setAccountProxy,
   signOutOlxAccount,
   startAccountDocker,
   startOlxLoginForAccount,
   stopAccountDocker,
+  testProxy,
+  testProxyFull,
   type OlxAccount,
+  type ProxyInput,
 } from "@/lib/api";
+import type { Proxy, ProxyFullTestResult, ProxyTestResult } from "@/lib/types";
 import { useAccountScope } from "@/lib/accounts";
 import { cn } from "@/lib/utils";
 
@@ -61,13 +80,26 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [purgeTarget, setPurgeTarget] = useState<OlxAccount | null>(null);
-  const [proxyTarget, setProxyTarget] = useState<OlxAccount | null>(null);
-  const [proxyForm, setProxyForm] = useState({ server: "", username: "", password: "" });
+  // doar id-ul, nu obiectul cont — altfel dupa o asignare de proxy reusita,
+  // proxyTarget ar ramane un instantaneu vechi (proxy_id stale) in loc sa
+  // reflecte imediat noua asignare din raspunsul invalidat de React Query
+  const [proxyTargetId, setProxyTargetId] = useState<string | null>(null);
+  const [newProxyOpen, setNewProxyOpen] = useState(false);
+  const [newProxyForm, setNewProxyForm] = useState({
+    label: "",
+    server: "",
+    username: "",
+    password: "",
+    skipValidation: false,
+  });
   const [, setScope] = useAccountScope();
 
   const session = useOlxSession().data;
   const accounts = session?.accounts ?? [];
   const loginRunning = session?.login_running ?? false;
+  // derivat din `accounts` la fiecare randare — reflecta imediat proxy_id-ul
+  // proaspat dupa o asignare, spre deosebire de un obiect cont stocat direct
+  const proxyTarget = accounts.find((a) => a.id === proxyTargetId) ?? null;
 
   // starea botilor: un cont care ruleaza nu poate fi deconectat fara ca
   // serverul sa opreasca intai botul, deci o aratam explicit
@@ -94,6 +126,14 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
     refetchInterval: open ? 2500 : false,
   });
   const dockerByAccount = new Map((dockerAccounts.data ?? []).map((d) => [d.account_id, d]));
+
+  // registrul central de proxy-uri — un singur loc de adevar, ca acelasi
+  // proxy sa nu ajunga din greseala pe doua conturi (vezi core/proxies.py)
+  const proxiesQ = useQuery({
+    queryKey: ["proxies"],
+    queryFn: getProxies,
+    refetchInterval: proxyTarget ? 4000 : false,
+  });
 
   const startDocker = useMutation({
     mutationFn: (id: string) => startAccountDocker(id),
@@ -158,26 +198,71 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
   });
 
   // proxy de iesire per cont — conturi diferite pe acelasi IP sunt usor de
-  // corelat de sistemele anti-frauda OLX; fiecare cont poate iesi separat
-  const saveProxy = useMutation({
-    mutationFn: (vars: { id: string; server: string; username: string; password: string }) =>
-      setAccountProxy(vars.id, {
-        server: vars.server,
-        username: vars.username,
-        password: vars.password,
-      }),
+  // corelat de sistemele anti-frauda OLX; fiecare cont poate iesi separat,
+  // printr-un proxy din registrul central (asignare prin id, nu adresa direct)
+  const assignProxy = useMutation({
+    mutationFn: (vars: { accountId: string; proxyId: string | null }) =>
+      setAccountProxy(vars.accountId, vars.proxyId),
     onSuccess: (data) => {
       invalidate();
-      setProxyTarget(null);
       const restartNote =
         data.restarted === "thread"
           ? " — botul s-a repornit automat, se aplică deja"
           : data.restarted === "docker"
             ? " — containerul se repornește automat, se aplică imediat ce pornește"
-            : " — se aplică la următoarea pornire a botului pe acest cont";
-      toast.success((data.has_proxy ? "Proxy salvat" : "Proxy șters") + restartNote);
+            : "";
+      if (data.moved_from) {
+        toast.info(
+          `Proxy mutat aici — contul „${data.moved_from.account_label}” a rămas fără proxy.`,
+        );
+      } else {
+        toast.success((data.has_proxy ? "Proxy asignat" : "Proxy dezasignat") + restartNote);
+      }
     },
-    onError: () => toast.error("Nu am putut salva proxy-ul"),
+    onError: () => toast.error("Nu am putut schimba proxy-ul contului"),
+  });
+
+  // adauga un proxy nou in registru SI il asigneaza imediat contului deschis
+  // in dialog — fluxul cel mai comun (rar adaugi un proxy fara sa-l folosesti)
+  const createAndAssignProxy = useMutation({
+    mutationFn: (vars: { accountId: string; input: ProxyInput }) => createProxy(vars.input),
+    onSuccess: (data, vars) => {
+      qc.invalidateQueries({ queryKey: ["proxies"] });
+      assignProxy.mutate({ accountId: vars.accountId, proxyId: data.proxy.id });
+      setNewProxyOpen(false);
+      setNewProxyForm({ label: "", server: "", username: "", password: "", skipValidation: false });
+      announceProxyTest(data.test, "Proxy adăugat");
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Nu am putut adăuga proxy-ul"),
+  });
+
+  const testProxyMutation = useMutation({
+    mutationFn: (id: string) => testProxy(id),
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ["proxies"] });
+      announceProxyTest(result, "Proxy testat");
+    },
+    onError: () => toast.error("Nu am putut testa proxy-ul"),
+  });
+
+  // verificare completa, cu Chromium real — mai lenta, dar prinde
+  // discrepante intre testul rapid (`requests`) si browserul real
+  const testProxyFullMutation = useMutation({
+    mutationFn: (id: string) => testProxyFull(id),
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ["proxies"] });
+      announceProxyFullTest(result);
+    },
+    onError: () => toast.error("Nu am putut rula verificarea completă"),
+  });
+
+  const deleteProxyMutation = useMutation({
+    mutationFn: (id: string) => deleteProxy(id, true),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["proxies"] });
+      toast.success("Proxy șters din registru");
+    },
+    onError: () => toast.error("Nu am putut șterge proxy-ul"),
   });
 
   const purge = useMutation({
@@ -292,14 +377,7 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
                         variant="ghost"
                         size="sm"
                         className="h-7 justify-start px-2 text-xs"
-                        onClick={() => {
-                          setProxyForm({
-                            server: a.proxy_server ?? "",
-                            username: a.proxy_username ?? "",
-                            password: "",
-                          });
-                          setProxyTarget(a);
-                        }}
+                        onClick={() => setProxyTargetId(a.id)}
                         title="Proxy de ieșire — cont diferit, IP diferit"
                       >
                         <Globe className="mr-1.5 h-3.5 w-3.5" strokeWidth={1.5} />
@@ -376,70 +454,167 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={proxyTarget !== null} onOpenChange={(o) => !o && setProxyTarget(null)}>
-        <DialogContent className="max-w-sm">
+      <Dialog
+        open={proxyTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) {
+            setProxyTargetId(null);
+            setNewProxyOpen(false);
+            setNewProxyForm({
+              label: "",
+              server: "",
+              username: "",
+              password: "",
+              skipValidation: false,
+            });
+          }
+        }}
+      >
+        <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>
-              Proxy — {proxyTarget ? accountDisplayName(proxyTarget) : ""}
-            </DialogTitle>
+            <DialogTitle>Proxy — {proxyTarget ? accountDisplayName(proxyTarget) : ""}</DialogTitle>
             <DialogDescription>
-              Contul iese pe internet prin acest proxy/VPN în loc de IP-ul mașinii. Util când ai mai
-              multe conturi OLX pe același calculator — IP diferit per cont, mai greu de corelat.
-              Lasă adresa goală ca să ștergi proxy-ul. Dacă botul acestui cont rulează deja, se
-              repornește automat ca să preia noul proxy — nu trebuie să faci nimic în plus.
+              Contul iese pe internet prin proxy-ul ales, în loc de IP-ul mașinii. Fiecare proxy
+              există o singură dată în registru — dacă alegi unul folosit deja de alt cont, acela
+              rămâne fără proxy (repornit automat dacă rula). Dacă botul acestui cont rulează deja,
+              se repornește automat ca să preia schimbarea.
             </DialogDescription>
           </DialogHeader>
+
           <div className="space-y-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="proxy-server">Adresă (server:port)</Label>
-              <Input
-                id="proxy-server"
-                placeholder="http://host:port sau socks5://host:port"
-                value={proxyForm.server}
-                onChange={(e) => setProxyForm((f) => ({ ...f, server: e.target.value }))}
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="proxy-username">Utilizator (opțional)</Label>
-                <Input
-                  id="proxy-username"
-                  value={proxyForm.username}
-                  onChange={(e) => setProxyForm((f) => ({ ...f, username: e.target.value }))}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="proxy-password">Parolă (opțional)</Label>
-                <Input
-                  id="proxy-password"
-                  type="password"
-                  placeholder={proxyTarget?.has_proxy ? "neschimbată dacă o lași goală" : ""}
-                  value={proxyForm.password}
-                  onChange={(e) => setProxyForm((f) => ({ ...f, password: e.target.value }))}
-                />
-              </div>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setProxyTarget(null)}>
-              Renunță
-            </Button>
-            <Button
-              disabled={saveProxy.isPending}
+            <button
+              type="button"
+              disabled={assignProxy.isPending}
               onClick={() =>
-                proxyTarget &&
-                saveProxy.mutate({
-                  id: proxyTarget.id,
-                  server: proxyForm.server.trim(),
-                  username: proxyForm.username.trim(),
-                  password: proxyForm.password.trim(),
-                })
+                proxyTarget && assignProxy.mutate({ accountId: proxyTarget.id, proxyId: null })
               }
+              className={cn(
+                "w-full rounded-lg border px-2.5 py-2 text-left text-xs transition-colors",
+                proxyTarget && !proxyTarget.proxy_id
+                  ? "border-primary/50 bg-primary/5"
+                  : "border-border/70 bg-muted/30 hover:bg-muted/50",
+              )}
             >
-              {saveProxy.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" strokeWidth={1.5} />
-              ) : null}
-              Salvează
+              Fără proxy (iese pe IP-ul mașinii)
+            </button>
+
+            {proxiesQ.isLoading ? (
+              <Skeleton className="h-16 w-full" />
+            ) : (
+              <ul className="max-h-56 space-y-1.5 overflow-y-auto">
+                {(proxiesQ.data ?? []).map((p) => (
+                  <ProxyRow
+                    key={p.id}
+                    proxy={p}
+                    selected={proxyTarget?.proxy_id === p.id}
+                    onSelect={() =>
+                      proxyTarget &&
+                      assignProxy.mutate({ accountId: proxyTarget.id, proxyId: p.id })
+                    }
+                    onTest={() => testProxyMutation.mutate(p.id)}
+                    onTestFull={() => testProxyFullMutation.mutate(p.id)}
+                    onDelete={() => {
+                      const msg = p.account_id
+                        ? `Ștergi proxy-ul „${p.label}”? E folosit acum de contul „${p.account_label}” — va rămâne fără proxy.`
+                        : `Ștergi proxy-ul „${p.label}” din registru?`;
+                      if (window.confirm(msg)) deleteProxyMutation.mutate(p.id);
+                    }}
+                    disabled={assignProxy.isPending}
+                    testing={testProxyMutation.isPending && testProxyMutation.variables === p.id}
+                    testingFull={
+                      testProxyFullMutation.isPending && testProxyFullMutation.variables === p.id
+                    }
+                  />
+                ))}
+                {(proxiesQ.data ?? []).length === 0 ? (
+                  <p className="px-1 py-2 text-xs text-muted-foreground">
+                    Niciun proxy în registru încă.
+                  </p>
+                ) : null}
+              </ul>
+            )}
+
+            {newProxyOpen ? (
+              <div className="space-y-2 rounded-lg border border-dashed border-border/80 p-2.5">
+                <Input
+                  placeholder="Etichetă (opțional, ex. „Vultr București”)"
+                  value={newProxyForm.label}
+                  onChange={(e) => setNewProxyForm((f) => ({ ...f, label: e.target.value }))}
+                />
+                <Input
+                  placeholder="socks5://host:port sau http://host:port"
+                  value={newProxyForm.server}
+                  onChange={(e) => setNewProxyForm((f) => ({ ...f, server: e.target.value }))}
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    placeholder="Utilizator (opțional)"
+                    value={newProxyForm.username}
+                    onChange={(e) => setNewProxyForm((f) => ({ ...f, username: e.target.value }))}
+                  />
+                  <Input
+                    type="password"
+                    placeholder="Parolă (opțional)"
+                    value={newProxyForm.password}
+                    onChange={(e) => setNewProxyForm((f) => ({ ...f, password: e.target.value }))}
+                  />
+                </div>
+                {createAndAssignProxy.isError ? (
+                  <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={newProxyForm.skipValidation}
+                      onChange={(e) =>
+                        setNewProxyForm((f) => ({ ...f, skipValidation: e.target.checked }))
+                      }
+                    />
+                    Salvează chiar dacă testul de conectivitate eșuează
+                  </label>
+                ) : null}
+                <div className="flex justify-end gap-2 pt-0.5">
+                  <Button variant="ghost" size="sm" onClick={() => setNewProxyOpen(false)}>
+                    Renunță
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={!newProxyForm.server.trim() || createAndAssignProxy.isPending}
+                    onClick={() =>
+                      proxyTarget &&
+                      createAndAssignProxy.mutate({
+                        accountId: proxyTarget.id,
+                        input: {
+                          label: newProxyForm.label.trim(),
+                          server: newProxyForm.server.trim(),
+                          username: newProxyForm.username.trim(),
+                          password: newProxyForm.password.trim(),
+                          skip_validation: newProxyForm.skipValidation,
+                        },
+                      })
+                    }
+                  >
+                    {createAndAssignProxy.isPending ? (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" strokeWidth={1.5} />
+                    ) : null}
+                    Testează și salvează
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full gap-1.5"
+                onClick={() => setNewProxyOpen(true)}
+              >
+                <Plus className="h-3.5 w-3.5" strokeWidth={1.5} />
+                Adaugă proxy nou
+              </Button>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setProxyTargetId(null)}>
+              Închide
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -472,6 +647,195 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
       </AlertDialog>
     </>
   );
+}
+
+/**
+ * Un proxy din registru, in dialogul de asignare per cont — arata starea
+ * ultimului test si, daca e folosit de alt cont, un avertisment (selectarea
+ * lui il muta aici si il lasa fara proxy pe celalalt).
+ */
+function ProxyRow({
+  proxy,
+  selected,
+  disabled,
+  testing,
+  testingFull,
+  onSelect,
+  onTest,
+  onTestFull,
+  onDelete,
+}: {
+  proxy: Proxy;
+  selected: boolean;
+  disabled: boolean;
+  testing: boolean;
+  testingFull: boolean;
+  onSelect: () => void;
+  onTest: () => void;
+  onTestFull: () => void;
+  onDelete: () => void;
+}) {
+  const usedByOther = proxy.account_id !== null && !selected;
+  return (
+    <li>
+      <div
+        className={cn(
+          "flex items-center gap-1.5 rounded-lg border px-2.5 py-2 text-xs transition-colors",
+          selected ? "border-primary/50 bg-primary/5" : "border-border/70 bg-muted/30",
+        )}
+      >
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={onSelect}
+          className="min-w-0 flex-1 text-left"
+        >
+          <div className="flex items-center gap-1.5">
+            <ProxyStatusDot check={proxy.last_check} />
+            <span className="truncate font-medium">{proxy.label}</span>
+          </div>
+          <div className="truncate text-[11px] text-muted-foreground">{proxy.server}</div>
+          {proxy.last_full_check ? (
+            <div
+              className={cn(
+                "mt-0.5 truncate text-[10px]",
+                proxy.last_full_check.ok
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-red-600 dark:text-red-400",
+              )}
+            >
+              verificare completă: {proxy.last_full_check.ok ? "ok" : "eșuată"}
+              {proxy.last_full_check.browser_ok === false ? " (browser real)" : ""}
+            </div>
+          ) : null}
+          {usedByOther ? (
+            <div className="mt-0.5 truncate text-[10px] text-amber-600 dark:text-amber-400">
+              folosit de {proxy.account_label}
+            </div>
+          ) : null}
+        </button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 shrink-0"
+          disabled={testing}
+          onClick={onTest}
+          title="Testează conectivitatea către OLX (rapid)"
+        >
+          {testing ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.5} />
+          ) : (
+            <Wifi className="h-3.5 w-3.5" strokeWidth={1.5} />
+          )}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 shrink-0"
+          disabled={testingFull}
+          onClick={onTestFull}
+          title="Testează complet, cu browser real (mai lent, ~5-15s)"
+        >
+          {testingFull ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.5} />
+          ) : (
+            <ShieldCheck className="h-3.5 w-3.5" strokeWidth={1.5} />
+          )}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 shrink-0 text-red-600 hover:text-red-700 dark:text-red-400"
+          onClick={onDelete}
+          title="Șterge din registru"
+        >
+          <Trash2 className="h-3.5 w-3.5" strokeWidth={1.5} />
+        </Button>
+      </div>
+    </li>
+  );
+}
+
+/**
+ * Bulina de stare a ultimului test: verde ok, chihlimbar ok-dar-țară-greșită
+ * (funcțional, dar iese din altă țară decât România — vezi core/proxies.py),
+ * roșu eșuat, gri netestat.
+ */
+function ProxyStatusDot({ check }: { check: Proxy["last_check"] }) {
+  if (!check) {
+    return <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-300" title="Netestat" />;
+  }
+  if (!check.ok) {
+    return (
+      <span
+        className="h-1.5 w-1.5 shrink-0 rounded-full bg-red-500"
+        title={check.error ?? "Eșuat"}
+      />
+    );
+  }
+  if (check.country_mismatch) {
+    return (
+      <span
+        className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+        title={`Funcțional, dar iese din ${check.country} — nu România (${check.latency_ms} ms)`}
+      />
+    );
+  }
+  return (
+    <span
+      className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500"
+      title={`OK, România (${check.latency_ms} ms)`}
+    />
+  );
+}
+
+/** Toast-ul rezultatului unui test — succes curat, avertisment (funcțional
+ *  dar din altă țară) sau eroare, ca userul să nu afle abia după ce
+ *  asignează proxy-ul pe un cont că iese din altă țară decât România. */
+function announceProxyTest(result: ProxyTestResult | null, prefix: string): void {
+  if (!result) {
+    toast.success(`${prefix} (netestat)`);
+    return;
+  }
+  if (!result.ok) {
+    toast.error(result.error ?? "Proxy nefuncțional");
+    return;
+  }
+  if (result.country_mismatch) {
+    toast.warning(
+      `${prefix} — funcțional, dar iese din ${result.country}, nu România ` +
+        `(${result.latency_ms} ms). Risc de corelare pentru un cont OLX.ro.`,
+    );
+    return;
+  }
+  toast.success(`${prefix} — funcțional, România (${result.latency_ms} ms)`);
+}
+
+/**
+ * Toast-ul verificării complete (Chromium real). Distinge explicit cazul
+ * "testul rapid a trecut, dar browserul real nu" — exact discrepanța care a
+ * invalidat o sesiune OLX reală în timpul testării acestei funcționalități.
+ */
+function announceProxyFullTest(result: ProxyFullTestResult): void {
+  if (!result.ok) {
+    if (result.browser_ok === false) {
+      toast.error(
+        `Verificare completă eșuată — testul rapid a trecut, dar browserul ` +
+          `real nu a putut folosi acest proxy: ${result.browser_error}`,
+      );
+    } else {
+      toast.error(result.error ?? "Proxy nefuncțional");
+    }
+    return;
+  }
+  if (result.country_mismatch) {
+    toast.warning(
+      `Verificare completă OK, dar proxy-ul iese din ${result.country}, nu ` +
+        `România (browser real: ${result.browser_latency_ms} ms). Risc de corelare.`,
+    );
+    return;
+  }
+  toast.success(`Verificare completă OK — browser real, România (${result.browser_latency_ms} ms)`);
 }
 
 /** Pastila de stare: verde pentru bine, gri pentru inactiv. */

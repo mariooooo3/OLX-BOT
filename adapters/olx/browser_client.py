@@ -108,6 +108,64 @@ def install_playwright_browsers() -> None:
     logger.info("Browsere Playwright instalate.")
 
 
+def browser_check_proxy(
+    server: str, username: str | None = None, password: str | None = None,
+    timeout_ms: float = 15000,
+) -> dict:
+    """Verificare completa a unui proxy, cu Chromium REAL — nu cu `requests`
+    (vezi core/proxies.py:test_proxy() pentru verificarea rapida, de retea).
+
+    De ce conteaza distinctia: un proxy poate trece testul rapid si totusi
+    sa se comporte diferit sub stiva TLS/HTTP a unui browser real —
+    verificat practic, a fost exact cauza pentru care sesiunea OLX a unui
+    cont real a fost invalidata desi `requests` raportase proxy-ul
+    functional (vezi memoria proiectului). Testul asta e mai lent (lanseaza
+    Chromium de la zero), de-asta ramane optional (buton separat "Testeaza
+    complet"), nu implicit la fiecare salvare.
+
+    Context efemer, FARA profil persistent si fara legatura cu vreun cont —
+    nu poate confirma o sesiune de login anume, doar ca OLX raspunde normal
+    (nu blocheaza/capcaneaza) prin acest proxy, sub un browser real. Complet
+    izolat de profilurile conturilor — sigur de rulat chiar daca botul
+    ruleaza in paralel pe alte conturi.
+
+    Returneaza {"ok", "error", "latency_ms"}. Nu arunca exceptii.
+    """
+    proxy_config: dict[str, str] = {"server": server}
+    if username:
+        proxy_config["username"] = username
+    if password:
+        proxy_config["password"] = password
+
+    started = time.monotonic()
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch(headless=True, proxy=proxy_config)
+            except Exception as e:
+                if "Executable doesn't exist" not in str(e):
+                    raise
+                install_playwright_browsers()
+                browser = p.chromium.launch(headless=True, proxy=proxy_config)
+            try:
+                context = browser.new_context(locale="ro-RO", timezone_id="Europe/Bucharest")
+                page = context.new_page()
+                page.goto(BASE_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+                latency_ms = round((time.monotonic() - started) * 1000, 1)
+                return {"ok": True, "error": None, "latency_ms": latency_ms}
+            finally:
+                browser.close()
+    except PlaywrightTimeoutError:
+        return {
+            "ok": False,
+            "error": "Timeout la încărcarea OLX prin acest proxy (browser real).",
+            "latency_ms": None,
+        }
+    except Exception as e:
+        message = str(e).strip().splitlines()[0] if str(e).strip() else "Eroare necunoscută."
+        return {"ok": False, "error": message[:300], "latency_ms": None}
+
+
 class BrowserClient:
     def __init__(
         self,

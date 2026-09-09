@@ -49,6 +49,7 @@ from core.accounts import (
     migrate_account_colors,
     migrate_global_data_to_account,
     migrate_legacy_profile,
+    migrate_legacy_proxies,
     read_bot_heartbeat,
     read_marker,
     save_accounts,
@@ -58,7 +59,21 @@ from core.accounts import (
 from core.finance import build_finance_report, normalize_transaction
 from core.message_handler import MessageHandler
 from core.product_schema import empty_product, migrate_product
+from core.proxies import (
+    create_proxy,
+    delete_proxy as delete_proxy_entry,
+    find_proxy,
+    list_proxies,
+    public_proxy,
+    set_last_check,
+    set_last_full_check,
+    test_proxy,
+    test_proxy_full,
+    update_proxy,
+)
+from core.proxies import assigned_account as proxy_assigned_account
 from core.seller_info import DEFAULT_SELLER_INFO, normalize as normalize_seller
+from core.suspicious_listing import default_rules, evaluate_listing
 from generate_docker_compose import build_compose_yaml, service_name
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -141,6 +156,7 @@ def account_info(account: dict, accounts: dict | None = None) -> dict:
         # parola de proxy NU se intoarce niciodata catre UI — doar adresa,
         # ca sa stii ce e configurat fara sa expui secretul in dashboard
         "has_proxy": proxy is not None,
+        "proxy_id": account.get("proxy_id"),
         "proxy_server": proxy["server"] if proxy else None,
         "proxy_username": proxy.get("username") if proxy else None,
     }
@@ -149,6 +165,7 @@ def account_info(account: dict, accounts: dict | None = None) -> dict:
 migrate_legacy_profile()
 migrate_global_data_to_account()
 migrate_account_colors()
+migrate_legacy_proxies()
 
 
 # Numar de ordine global pentru erori. Doua conturi care cad in acelasi
@@ -601,6 +618,7 @@ class BotFleet:
 
 fleet = BotFleet()
 _finance_write_lock = threading.Lock()
+_suspicious_listings_lock = threading.Lock()
 
 app = FastAPI(title="OLX Bot API")
 app.add_middleware(
@@ -609,6 +627,118 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# --------------------------------------------------------------------- #
+# anunturi suspecte (analiza asistata, fara raportare automata)
+# --------------------------------------------------------------------- #
+
+def _suspicious_path(account_id: str) -> Path:
+    return account_data_dir(account_id) / "suspicious_listings.json"
+
+
+def _read_suspicious(account_id: str) -> dict:
+    path = _suspicious_path(account_id)
+    if not path.exists():
+        return {"rules": default_rules(), "listings": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {"rules": {**default_rules(), **(data.get("rules") or {})}, "listings": data.get("listings") or []}
+    except (OSError, json.JSONDecodeError):
+        return {"rules": default_rules(), "listings": []}
+
+
+def _write_suspicious(account_id: str, data: dict) -> None:
+    path = _suspicious_path(account_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(path)
+
+
+@app.get("/api/suspicious-listings")
+def get_suspicious_listings(account_id: str | None = None):
+    account = _target_account(account_id)
+    data = _read_suspicious(account["id"])
+    return data | {"account_id": account["id"], "account_label": account_display_name(account)}
+
+
+@app.put("/api/suspicious-listings/rules")
+def save_suspicious_rules(rules: dict, account_id: str | None = None):
+    account = _target_account(account_id)
+    with _suspicious_listings_lock:
+        data = _read_suspicious(account["id"])
+        data["rules"] = {**default_rules(), **{k: rules[k] for k in default_rules() if k in rules}}
+        data["listings"] = [evaluate_listing(item, data["rules"]) for item in data["listings"]]
+        _write_suspicious(account["id"], data)
+    return data
+
+
+@app.post("/api/suspicious-listings")
+def add_suspicious_listing(listing: dict, account_id: str | None = None):
+    account = _target_account(account_id)
+    title = str(listing.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="Titlul anunțului este obligatoriu.")
+    with _suspicious_listings_lock:
+        data = _read_suspicious(account["id"])
+        candidate = {
+            "id": f"listing_{uuid.uuid4().hex[:10]}", "title": title,
+            "url": str(listing.get("url") or "").strip(),
+            "price": listing.get("price"), "currency": str(listing.get("currency") or "RON").upper(),
+            "description": str(listing.get("description") or "").strip(),
+            "status": "de_verificat", "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        evaluated = evaluate_listing(candidate, data["rules"])
+        data["listings"].insert(0, evaluated)
+        _write_suspicious(account["id"], data)
+    return evaluated
+
+
+@app.put("/api/suspicious-listings/{listing_id}/status")
+def set_suspicious_listing_status(listing_id: str, body: dict, account_id: str | None = None):
+    status = body.get("status")
+    if status not in ("de_verificat", "verificat", "fals_positiv"):
+        raise HTTPException(status_code=422, detail="Stare invalidă.")
+    account = _target_account(account_id)
+    with _suspicious_listings_lock:
+        data = _read_suspicious(account["id"])
+        item = next((x for x in data["listings"] if x.get("id") == listing_id), None)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Anunț inexistent")
+        item["status"] = status
+        _write_suspicious(account["id"], data)
+    return item
+
+
+@app.put("/api/suspicious-listings/{listing_id}/message")
+def set_suspicious_listing_message(listing_id: str, body: dict, account_id: str | None = None):
+    """Salveaza mesajul ajustat de utilizator; nu il transmite pe OLX."""
+    message = str(body.get("suggested_message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="Mesajul nu poate fi gol.")
+    account = _target_account(account_id)
+    with _suspicious_listings_lock:
+        data = _read_suspicious(account["id"])
+        item = next((x for x in data["listings"] if x.get("id") == listing_id), None)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Anunț inexistent")
+        item["suggested_message"] = message[:2000]
+        _write_suspicious(account["id"], data)
+    return item
+
+
+@app.delete("/api/suspicious-listings/{listing_id}")
+def delete_suspicious_listing(listing_id: str, account_id: str | None = None):
+    account = _target_account(account_id)
+    with _suspicious_listings_lock:
+        data = _read_suspicious(account["id"])
+        previous = len(data["listings"])
+        data["listings"] = [x for x in data["listings"] if x.get("id") != listing_id]
+        if len(data["listings"]) == previous:
+            raise HTTPException(status_code=404, detail="Anunț inexistent")
+        _write_suspicious(account["id"], data)
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------- #
@@ -1193,76 +1323,227 @@ def add_olx_account(body: dict | None = None):
     return {"id": account["id"], "label": account["label"]}
 
 
+def _restart_running_account(account_id: str) -> str | None:
+    """Reporneste botul contului daca ruleaza (thread local sau container
+    Docker), ca sa preia imediat proxy-ul (sau lipsa lui) tocmai schimbat —
+    userul nu mai are nimic de facut dupa ce salveaza/asigneaza un proxy.
+    Intoarce "thread" | "docker" | None (nu rula nimic de repornit)."""
+    runner = fleet.get(account_id)
+    if runner.running:
+        try:
+            fleet.stop_account(account_id, wait=True)
+            fleet.start_account(account_id)
+            return "thread"
+        except Exception as e:
+            logger.warning(
+                "Repornirea automata dupa schimbarea proxy-ului a esuat pentru {}: {}",
+                account_id, e,
+            )
+            return None
+    heartbeat = read_bot_heartbeat(account_id)
+    if heartbeat and heartbeat.get("running") and _docker_available()["available"]:
+        with _docker_jobs_lock:
+            existing_job = _docker_jobs.get(account_id)
+            if not existing_job or existing_job.get("done"):
+                _docker_jobs[account_id] = {
+                    "step": "în așteptare...", "done": False, "error": None, "log_tail": "",
+                }
+                threading.Thread(
+                    target=_run_docker_restart, args=(account_id,), daemon=True
+                ).start()
+                return "docker"
+    return None
+
+
 @app.put("/api/olx/accounts/{account_id}/proxy")
 def set_account_proxy(account_id: str, body: dict):
-    """Configureaza sau sterge proxy-ul de iesire al contului.
+    """Asigneaza (sau, cu `proxy_id` lipsa/null, dezasigneaza) un proxy din
+    registrul central (data/proxies.json, vezi core/proxies.py -> endpoint-urile
+    /api/proxies) contului dat.
 
-    Corp gol / fara `server` = sterge proxy-ul (contul iese direct). Un
-    context de browser deja deschis (thread local sau container Docker) tine
-    proxy-ul vechi pana la restart — asa ca daca botul acestui cont ruleaza
-    deja, il repornim automat aici, ca userul sa nu mai aiba nimic de facut
-    dupa ce salveaza adresa: "pui proxy-ul si atat".
+    Un proxy deja asignat altui cont e MUTAT aici — dezasignat automat de la
+    vechiul proprietar — ca sa nu ajungem cu doi id-uri de cont pe acelasi
+    proxy_id, exact greseala pe care registrul central o previne (README:
+    "un cont OLX = un proxy fix"). Contul care il pierde e repornit si el,
+    daca rula, ca sa nu continue sa iasa (gresit) pe un proxy care acum
+    apartine altcuiva.
     """
     accounts = load_accounts()
     account = find_account(accounts, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="Cont inexistent")
 
-    server_url = str(body.get("server") or "").strip()
-    if not server_url:
-        account.pop("proxy", None)
+    proxy_id = body.get("proxy_id") or None
+    moved_from: dict | None = None
+    if proxy_id:
+        if find_proxy(list_proxies(), proxy_id) is None:
+            raise HTTPException(status_code=404, detail="Proxy inexistent")
+        moved_from = next(
+            (
+                a for a in accounts["accounts"]
+                if a.get("proxy_id") == proxy_id and a["id"] != account_id
+            ),
+            None,
+        )
+        if moved_from is not None:
+            moved_from.pop("proxy_id", None)
+        account["proxy_id"] = proxy_id
     else:
-        # parola nu se trimite niciodata inapoi catre UI (vezi account_info),
-        # deci un camp gol la editare inseamna "neschimbata", nu "sterge-o"
-        existing = account.get("proxy") if isinstance(account.get("proxy"), dict) else {}
-        proxy = {"server": server_url}
-        username = str(body.get("username") or "").strip()
-        password = str(body.get("password") or "").strip()
-        proxy["username"] = username or existing.get("username") or None
-        proxy["password"] = password or existing.get("password") or None
-        proxy = {k: v for k, v in proxy.items() if v}
-        account["proxy"] = proxy
+        account.pop("proxy_id", None)
+    account.pop("proxy", None)  # camp vechi (inline) — inlocuit de proxy_id
     save_accounts(accounts)
     logger.info(
         "Proxy {} pentru contul {}.",
-        "configurat" if server_url else "sters",
+        f"asignat ({proxy_id})" if proxy_id else "dezasignat",
         account_display_name(account),
     )
 
-    restarted: str | None = None
-    runner = fleet.get(account_id)
-    if runner.running:
-        # thread local: oprim si repornim cu contextul de browser nou —
-        # preia imediat proxy-ul (sau lipsa lui) tocmai salvat
-        try:
-            fleet.stop_account(account_id, wait=True)
-            fleet.start_account(account_id)
-            restarted = "thread"
-        except Exception as e:
-            logger.warning(
-                "Repornirea automata dupa schimbarea proxy-ului a esuat pentru {}: {}",
-                account_display_name(account), e,
-            )
-    else:
-        heartbeat = read_bot_heartbeat(account_id)
-        if heartbeat and heartbeat.get("running") and _docker_available()["available"]:
-            with _docker_jobs_lock:
-                existing_job = _docker_jobs.get(account_id)
-                if not existing_job or existing_job.get("done"):
-                    _docker_jobs[account_id] = {
-                        "step": "în așteptare...", "done": False, "error": None, "log_tail": "",
-                    }
-                    threading.Thread(
-                        target=_run_docker_restart, args=(account_id,), daemon=True
-                    ).start()
-                    restarted = "docker"
+    restarted = _restart_running_account(account_id)
+    if moved_from is not None:
+        _restart_running_account(moved_from["id"])
 
     return {
         "ok": True,
         "account_id": account_id,
-        "has_proxy": bool(server_url),
+        "has_proxy": bool(proxy_id),
         "restarted": restarted,
+        "moved_from": (
+            {"account_id": moved_from["id"], "account_label": account_display_name(moved_from)}
+            if moved_from else None
+        ),
     }
+
+
+# --------------------------------------------------------------------- #
+# registru de proxy-uri — un singur loc de adevar, ca acelasi proxy sa nu
+# ajunga din greseala pe doua conturi (vezi core/proxies.py)
+# --------------------------------------------------------------------- #
+
+def _proxy_or_404(proxy_id: str) -> dict:
+    proxy = find_proxy(list_proxies(), proxy_id)
+    if proxy is None:
+        raise HTTPException(status_code=404, detail="Proxy inexistent")
+    return proxy
+
+
+@app.get("/api/proxies")
+def get_proxies():
+    """Toate proxy-urile din registru, fiecare cu contul care il foloseste
+    acum (daca vreunul) — sursa pentru selectorul de proxy din dashboard."""
+    accounts = load_accounts()
+    return [public_proxy(p, proxy_assigned_account(p["id"], accounts)) for p in list_proxies()]
+
+
+@app.post("/api/proxies")
+def create_proxy_endpoint(body: dict):
+    """Adauga un proxy nou in registru. Testeaza conectivitatea catre OLX
+    inainte sa salveze (implicit) — o adresa/parola gresita se vede imediat,
+    nu abia cand botul incearca sa se logheze prin ea. `skip_validation:
+    true` salveaza oricum, pentru un proxy temporar picat sau greu de
+    testat de pe reteaua curenta."""
+    server_url = str(body.get("server") or "").strip()
+    if not server_url:
+        raise HTTPException(status_code=400, detail="Adresa proxy este obligatorie.")
+    username = str(body.get("username") or "").strip() or None
+    password = str(body.get("password") or "").strip() or None
+    label = str(body.get("label") or "").strip()
+    skip_validation = bool(body.get("skip_validation"))
+
+    result = None
+    if not skip_validation:
+        result = test_proxy(server_url, username, password)
+        if not result["ok"]:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Proxy-ul nu răspunde: {result['error']} "
+                       "(poți trimite skip_validation ca să-l salvezi oricum).",
+            )
+
+    proxy = create_proxy(label, server_url, username, password)
+    if result is not None:
+        proxy = set_last_check(proxy["id"], result)
+    return {"proxy": public_proxy(proxy, None), "test": result}
+
+
+@app.put("/api/proxies/{proxy_id}")
+def update_proxy_endpoint(proxy_id: str, body: dict):
+    """Editeaza un proxy existent. `username`/`password` goale raman
+    neschimbate (acelasi tipar ca la proxy-ul per cont, dinainte de
+    registru) — parola nu se intoarce niciodata catre UI, deci un camp gol
+    la editare nu poate insemna altceva decat "nu am schimbat-o"."""
+    current = _proxy_or_404(proxy_id)
+    skip_validation = bool(body.get("skip_validation"))
+    fields: dict = {}
+    if "label" in body:
+        fields["label"] = str(body.get("label") or "")
+    if body.get("server"):
+        fields["server"] = str(body["server"]).strip()
+    if body.get("username"):
+        fields["username"] = str(body["username"]).strip()
+    if body.get("password"):
+        fields["password"] = str(body["password"]).strip()
+
+    result = None
+    connection_changed = any(k in fields for k in ("server", "username", "password"))
+    if not skip_validation and connection_changed:
+        merged = current | fields
+        result = test_proxy(merged.get("server", ""), merged.get("username"), merged.get("password"))
+        if not result["ok"]:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Proxy-ul nu răspunde: {result['error']} "
+                       "(poți trimite skip_validation ca să salvezi oricum).",
+            )
+
+    proxy = update_proxy(proxy_id, **fields)
+    if result is not None:
+        proxy = set_last_check(proxy_id, result)
+    return {"proxy": public_proxy(proxy, proxy_assigned_account(proxy_id)), "test": result}
+
+
+@app.post("/api/proxies/{proxy_id}/test")
+def test_proxy_endpoint(proxy_id: str):
+    """Reruleaza testul de conectivitate la cerere (buton dedicat in UI) —
+    util ca sa verifici periodic un proxy fara sa-i schimbi configuratia."""
+    proxy = _proxy_or_404(proxy_id)
+    result = test_proxy(proxy["server"], proxy.get("username"), proxy.get("password"))
+    set_last_check(proxy_id, result)
+    return result
+
+
+@app.post("/api/proxies/{proxy_id}/test-full")
+def test_proxy_full_endpoint(proxy_id: str):
+    """Verificare completa, cu Chromium real — mai lenta (~5-15s) decat
+    /test, dar prinde discrepante intre `requests` si browserul real (vezi
+    core/proxies.py:test_proxy_full()). Buton separat in UI, nu implicit."""
+    proxy = _proxy_or_404(proxy_id)
+    result = test_proxy_full(proxy["server"], proxy.get("username"), proxy.get("password"))
+    set_last_full_check(proxy_id, result)
+    return result
+
+
+@app.delete("/api/proxies/{proxy_id}")
+def delete_proxy_endpoint(proxy_id: str, force: bool = False):
+    """Sterge un proxy din registru. Refuzat cu 409 daca e alocat unui cont
+    (?force=true il dezasigneaza si il sterge oricum) — altfel contul ar
+    ramane cu un `proxy_id` orfan, tratat tacit ca "fara proxy" de
+    account_proxy(), ceea ce ar ascunde o schimbare pe care userul n-a
+    cerut-o explicit."""
+    accounts = load_accounts()
+    owner = proxy_assigned_account(proxy_id, accounts)
+    if owner is not None and not force:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Proxy-ul e alocat contului „{account_display_name(owner)}” — "
+                   "dezasignează-l întâi sau șterge cu ?force=true.",
+        )
+    if owner is not None:
+        owner.pop("proxy_id", None)
+        save_accounts(accounts)
+        _restart_running_account(owner["id"])
+    if not delete_proxy_entry(proxy_id):
+        raise HTTPException(status_code=404, detail="Proxy inexistent")
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------- #

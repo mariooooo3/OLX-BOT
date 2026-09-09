@@ -9,5 +9,9 @@ fastembed
 # MVP2 — stocare pe DB (SQLite acum; Postgres prin schimbarea DATABASE_URL)
 sqlalchemy>=2.0
 requests
+# suport SOCKS5 pentru `requests` — necesar la testarea proxy-urilor din
+# registru (vezi core/proxies.py); Playwright n-are nevoie de el, are
+# suport SOCKS5 nativ
+pysocks
 # necesar DOAR pentru PostgreSQL (decomenteaza cand treci pe Postgres):
 # psycopg[binary]

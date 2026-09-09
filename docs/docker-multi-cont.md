@@ -139,3 +139,41 @@ etc.).
   exact aceeași combinație de user-agent/rezoluție/placă video e mică
   (sub ~5%) — spațiul de combinații e generat separat pe fiecare
   componentă. Chiar și atunci, zgomotul de pe canvas tot diferă între ele.
+
+## Optimizări la nivel de infrastructură Docker
+
+`docker-compose.yml`-ul generat (automat sau manual, din `docker-compose.example.yml`)
+folosește un tipar comun (`x-worker`, o ancoră YAML) pentru toate conturile:
+
+- **O singură imagine, construită o dată** (`image: olx-bot-worker:latest`,
+  aceeași pentru toate serviciile) — cu multe conturi, nu se mai repetă
+  build-ul complet la fiecare cont; Docker refolosește cache-ul de layere.
+- **Limite de resurse implicite** (`mem_limit`, `cpus`) — fiecare container
+  rulează un Chromium headless complet; fără limită, un cont cu o pagină
+  blocată poate epuiza RAM-ul mașinii și afecta celelalte conturi.
+  Suprascrii implicitul din `.env`:
+  ```
+  OLX_BOT_MEM_LIMIT=1g
+  OLX_BOT_CPUS=1.5
+  ```
+- **Healthcheck real** ([docker_healthcheck.py](../docker_healthcheck.py)) —
+  verifică vârsta heartbeat-ului contului (nu doar dacă procesul e viu).
+  `restart: unless-stopped` singur repornește un container doar când
+  procesul chiar se termină (crapă); un browser Playwright *agățat* (pagină
+  care nu mai răspunde niciodată) rămâne "pornit" la nesfârșit fără asta.
+  O sesiune expirată (`running=false`, scrisă la timp de `bot_worker.py`)
+  rămâne "healthy" — nu e o buclă blocată, doar așteaptă re-login din
+  dashboard, deci nu declanșează restart.
+- **Serviciu `autoheal`** — un singur container (`willfarrell/autoheal`,
+  pornit automat o dată cu primul cont, via `depends_on`) care repornește
+  automat orice container etichetat `autoheal=true` ajuns "unhealthy".
+  **Atenție**: montează `/var/run/docker.sock`, ceea ce îi dă acces complet
+  la Docker pe mașina respectivă (echivalent root la nivel de host) — e un
+  tipar comun și o imagine minimală dedicată exact acestui scop, dar merită
+  cunoscut înainte să pornești stack-ul. Dacă preferi să nu-l rulezi, șterge
+  blocul `autoheal` și câmpul `depends_on` din `x-worker` într-un
+  `docker-compose.override.yml` — restul funcționează identic, doar fără
+  restart automat pe buclă blocată.
+
+Regenerarea (`python generate_docker_compose.py --force` sau butonul din
+dashboard) aplică automat toate cele de mai sus pentru orice cont nou.

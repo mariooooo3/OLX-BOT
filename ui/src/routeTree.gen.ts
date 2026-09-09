@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as SuspiciousListingsRouteImport } from './routes/suspicious-listings'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as FinanceRouteImport } from './routes/finance'
 import { Route as ConversationsRouteImport } from './routes/conversations'
@@ -16,6 +17,11 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ProductsIndexRouteImport } from './routes/products.index'
 import { Route as ProductsProductIdRouteImport } from './routes/products.$productId'
 
+const SuspiciousListingsRoute = SuspiciousListingsRouteImport.update({
+  id: '/suspicious-listings',
+  path: '/suspicious-listings',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -52,6 +58,7 @@ export interface FileRoutesByFullPath {
   '/conversations': typeof ConversationsRoute
   '/finance': typeof FinanceRoute
   '/settings': typeof SettingsRoute
+  '/suspicious-listings': typeof SuspiciousListingsRoute
   '/products/$productId': typeof ProductsProductIdRoute
   '/products/': typeof ProductsIndexRoute
 }
@@ -60,6 +67,7 @@ export interface FileRoutesByTo {
   '/conversations': typeof ConversationsRoute
   '/finance': typeof FinanceRoute
   '/settings': typeof SettingsRoute
+  '/suspicious-listings': typeof SuspiciousListingsRoute
   '/products/$productId': typeof ProductsProductIdRoute
   '/products': typeof ProductsIndexRoute
 }
@@ -69,6 +77,7 @@ export interface FileRoutesById {
   '/conversations': typeof ConversationsRoute
   '/finance': typeof FinanceRoute
   '/settings': typeof SettingsRoute
+  '/suspicious-listings': typeof SuspiciousListingsRoute
   '/products/$productId': typeof ProductsProductIdRoute
   '/products/': typeof ProductsIndexRoute
 }
@@ -79,6 +88,7 @@ export interface FileRouteTypes {
     | '/conversations'
     | '/finance'
     | '/settings'
+    | '/suspicious-listings'
     | '/products/$productId'
     | '/products/'
   fileRoutesByTo: FileRoutesByTo
@@ -87,6 +97,7 @@ export interface FileRouteTypes {
     | '/conversations'
     | '/finance'
     | '/settings'
+    | '/suspicious-listings'
     | '/products/$productId'
     | '/products'
   id:
@@ -95,6 +106,7 @@ export interface FileRouteTypes {
     | '/conversations'
     | '/finance'
     | '/settings'
+    | '/suspicious-listings'
     | '/products/$productId'
     | '/products/'
   fileRoutesById: FileRoutesById
@@ -104,12 +116,20 @@ export interface RootRouteChildren {
   ConversationsRoute: typeof ConversationsRoute
   FinanceRoute: typeof FinanceRoute
   SettingsRoute: typeof SettingsRoute
+  SuspiciousListingsRoute: typeof SuspiciousListingsRoute
   ProductsProductIdRoute: typeof ProductsProductIdRoute
   ProductsIndexRoute: typeof ProductsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/suspicious-listings': {
+      id: '/suspicious-listings'
+      path: '/suspicious-listings'
+      fullPath: '/suspicious-listings'
+      preLoaderRoute: typeof SuspiciousListingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/settings': {
       id: '/settings'
       path: '/settings'
@@ -160,6 +180,7 @@ const rootRouteChildren: RootRouteChildren = {
   ConversationsRoute: ConversationsRoute,
   FinanceRoute: FinanceRoute,
   SettingsRoute: SettingsRoute,
+  SuspiciousListingsRoute: SuspiciousListingsRoute,
   ProductsProductIdRoute: ProductsProductIdRoute,
   ProductsIndexRoute: ProductsIndexRoute,
 }

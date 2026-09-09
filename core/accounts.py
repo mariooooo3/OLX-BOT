@@ -136,9 +136,63 @@ def account_proxy(account: dict) -> dict | None:
     corelat de sistemele anti-frauda OLX. Fiecare cont poate avea propriul
     proxy/VPN (vezi adapters/olx/browser_client.py si server.py — endpoint
     PUT /api/olx/accounts/{id}/proxy).
+
+    Rezolvat din registrul central (data/proxies.json, vezi core/proxies.py)
+    prin `account["proxy_id"]` — un singur loc de adevar, ca acelasi proxy sa
+    nu ajunga din greseala pe doua conturi. Conturile inca nemigrate (fara
+    `proxy_id`, cu proxy-ul inca inline din versiunile vechi) cad pe campul
+    vechi — nu ar trebui sa se intample in practica, migrate_legacy_proxies()
+    ruleaza o data la pornirea serverului, dar e o plasa de siguranta ca un
+    cont sa nu ramana brusc fara proxy daca migrarea a fost sarita cumva.
     """
-    proxy = account.get("proxy")
-    return proxy if isinstance(proxy, dict) and proxy.get("server") else None
+    # import local: evita ciclul (core.proxies importa din acest modul, la
+    # randul lui, pentru account_display_name/load_accounts)
+    from core.proxies import find_proxy, list_proxies, resolve_connection
+
+    proxy_id = account.get("proxy_id")
+    if proxy_id:
+        proxy = find_proxy(list_proxies(), proxy_id)
+        if proxy is not None:
+            return resolve_connection(proxy)
+        logger.warning(
+            "Contul {} referă un proxy inexistent ({}) — iese fără proxy.",
+            account.get("id"), proxy_id,
+        )
+        return None
+    legacy = account.get("proxy")
+    return legacy if isinstance(legacy, dict) and legacy.get("server") else None
+
+
+def migrate_legacy_proxies() -> None:
+    """Muta proxy-urile vechi (dict inline pe `account["proxy"]`) in
+    registrul central data/proxies.json — vezi core/proxies.py pentru motiv.
+    Idempotenta si sigura de rulat la fiecare pornire a serverului: un cont
+    deja migrat (are `proxy_id`) trece neschimbat."""
+    from core.proxies import create_proxy
+
+    accounts = load_accounts()
+    changed = False
+    for account in accounts["accounts"]:
+        if account.get("proxy_id"):
+            if "proxy" in account:  # curatare: campul vechi ar fi trebuit sters deja
+                account.pop("proxy", None)
+                changed = True
+            continue
+        legacy = account.get("proxy")
+        if not isinstance(legacy, dict) or not legacy.get("server"):
+            continue
+        proxy = create_proxy(
+            label=f"Proxy {account_display_name(account)}",
+            server=legacy.get("server", ""),
+            username=legacy.get("username"),
+            password=legacy.get("password"),
+        )
+        account["proxy_id"] = proxy["id"]
+        account.pop("proxy", None)
+        changed = True
+        logger.info("Proxy migrat in registru pentru contul {}: {}", account["id"], proxy["id"])
+    if changed:
+        save_accounts(accounts)
 
 
 def account_connected(account: dict) -> bool:
