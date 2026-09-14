@@ -18,6 +18,7 @@ Daca sesiunea expira, botul semnaleaza clar ca e nevoie de un nou
 
 Selectorii OLX se pot schimba — sunt centralizati in SELECTORS.
 """
+import json
 import random
 import subprocess
 import sys
@@ -30,8 +31,9 @@ from playwright.sync_api import BrowserContext, Page, sync_playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from adapters.olx.session_check import dom_logged_in, fetch_me
+from core.accounts import SESSION_MARKER_NAME
 from core.faq_matcher import normalize_text
-from core.fingerprint import init_script_for, profile_for
+from core.fingerprint import LAUNCH_ARGS, init_script_for, profile_for
 from core.response_formatter import sanitize_response
 
 BASE_URL = "https://www.olx.ro"
@@ -248,7 +250,7 @@ class BrowserClient:
             viewport=fingerprint["viewport"],
             user_agent=fingerprint["user_agent"],
             device_scale_factor=fingerprint["device_scale_factor"],
-            args=["--disable-blink-features=AutomationControlled"],
+            args=LAUNCH_ARGS,
         )
         if self.proxy and self.proxy.get("server"):
             kwargs["proxy"] = {
@@ -286,7 +288,9 @@ class BrowserClient:
     def is_logged_in(self) -> bool:
         """Verificare in doua trepte: API-ul users/me (stabil, fara navigare),
         apoi fallback pe pagina /myaccount/ (vezi session_check)."""
-        if fetch_me(self._context) is not None:
+        me = fetch_me(self._context)
+        if me is not None:
+            self._refresh_marker_identity(me)
             return True
         # cookie-ul access_token expira intre rulari si e reimprospatat de
         # pagina abia dupa o navigare — la pornire "rece" users/me poate
@@ -297,10 +301,50 @@ class BrowserClient:
             self._page.wait_for_timeout(4000)
         except Exception:
             pass
-        if fetch_me(self._context) is not None:
+        me = fetch_me(self._context)
+        if me is not None:
+            self._refresh_marker_identity(me)
             return True
         logger.debug("users/me nu a confirmat nici dupa homepage — fallback DOM.")
         return dom_logged_in(self._page)
+
+    def _refresh_marker_identity(self, me: dict) -> None:
+        """Completeaza numele/email-ul in markerul de sesiune, daca lipsesc.
+
+        Login-ul manual (login.py) poate confirma sesiunea printr-o cale
+        care nu intoarce email/nume (fallback DOM, cand API-ul users/me nu
+        raspunde inca la momentul respectiv) — dashboard-ul arata atunci
+        eticheta generica ("Cont 1") in loc de numele real de pe OLX.
+        Prima data cand BOTUL insusi confirma sesiunea prin users/me (care
+        CHIAR are aceste campuri), le completam retroactiv — self-vindecare,
+        fara sa mai fie nevoie de un nou login manual doar pentru atat.
+        """
+        email = me.get("email")
+        name = me.get("name")
+        if not email and not name:
+            return
+        marker_path = self.profile_dir / SESSION_MARKER_NAME
+        try:
+            marker = (
+                json.loads(marker_path.read_text(encoding="utf-8"))
+                if marker_path.exists() else {}
+            )
+        except Exception:
+            marker = {}
+        changed = False
+        if email and marker.get("username") != email:
+            marker["username"] = email
+            changed = True
+        if name and marker.get("name") != name:
+            marker["name"] = name
+            changed = True
+        if not changed:
+            return
+        try:
+            marker_path.write_text(json.dumps(marker, ensure_ascii=False), encoding="utf-8")
+            logger.info("Nume/email completate in markerul de sesiune ({}).", self.profile_dir)
+        except Exception as e:
+            logger.debug("Nu am putut actualiza markerul de sesiune: {}", e)
 
     def _accept_cookies(self) -> None:
         try:

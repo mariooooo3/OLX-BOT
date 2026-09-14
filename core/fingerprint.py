@@ -7,15 +7,15 @@ ar parea ca acelasi "om" foloseste un laptop nou de fiecare data — semnal la
 fel de suspect ca amprenta identica intre conturi diferite. In schimb, aici
 alegem componentele o singura data, pe baza hash-ului caii profilului de
 browser — acelasi profil = aceeasi amprenta, mereu, in orice proces
-(dashboard, container Docker, fereastra de login manual).
+(dashboard, fereastra de login manual).
 
 De ce dupa profile_dir si nu dupa account_id: login.py (care deschide
-fereastra de login manual) si BrowserClient (care ruleaza botul, eventual
-intr-un container separat) trebuie sa foloseasca EXACT aceeasi amprenta
-pentru acelasi cont — altfel sesiunea creata la login ar parea, din
-perspectiva OLX, un dispozitiv diferit fata de cel care trimite mesajele.
-profile_dir e singurul identificator pe care il au ambele (login.py nu
-primeste intotdeauna account_id, dar primeste mereu --profile).
+fereastra de login manual) si BrowserClient (care ruleaza botul) trebuie sa
+foloseasca EXACT aceeasi amprenta pentru acelasi cont — altfel sesiunea
+creata la login ar parea, din perspectiva OLX, un dispozitiv diferit fata de
+cel care trimite mesajele. profile_dir e singurul identificator pe care il
+au ambele (login.py nu primeste intotdeauna account_id, dar primeste mereu
+--profile).
 
 De ce componente independente si nu un pool fix de profiluri complete: cu
 putine profiluri complete (ex. 8), doua conturi ale aceluiasi user coliziona
@@ -70,6 +70,22 @@ _UA_TEMPLATE = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/{version} Safari/537.36"
 )
+
+# Flag-uri de pornire comune pentru orice context Playwright al proiectului
+# (bot si login.py) — o singura sursa, ca sa nu ajunga sa difere intre ele.
+#
+# --force-webrtc-ip-handling-policy=disable_non_proxied_udp: fara asta,
+# proxy-ul Playwright acopera doar traficul HTTP(S) — WebRTC deschide propriile
+# conexiuni UDP prin STUN, in AFARA proxy-ului, si poate scurge IP-ul local
+# real (ex. cel de acasa) catre o pagina OLX printr-un simplu
+# RTCPeerConnection, indiferent cat de bun e proxy-ul. Acest flag forteaza
+# Chromium sa nu mai foloseasca deloc conexiuni UDP neproxy-ate, deci
+# candidatii WebRTC raman fie goi, fie trec prin acelasi proxy ca restul
+# traficului — niciodata IP-ul local direct.
+LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+]
 
 
 def _identity(profile_dir: str | Path) -> str:

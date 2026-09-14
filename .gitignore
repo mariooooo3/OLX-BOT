@@ -27,6 +27,5 @@ data/embeddings_cache.json
 # unelte locale specifice acestui calculator (cai absolute, istoric local)
 .claude/settings.local.json
 
-# generat automat de generate_docker_compose.py din data/accounts.json —
-# id-uri de cont specifice acestui calculator, ca si accounts.json de mai sus
-docker-compose.yml
+# registrul de proxy-uri — contine credentiale (user/parola) per proxy
+data/proxies.json

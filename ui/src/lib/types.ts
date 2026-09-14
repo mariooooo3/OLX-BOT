@@ -263,42 +263,25 @@ export interface PullJob {
   error: string | null;
 }
 
-export interface SuspiciousSignal {
-  kind: "title" | "price" | "terms";
-  weight: number;
-  text: string;
-}
-
-export interface SuspiciousListing {
-  id: string;
+/** Un anunt gasit prin cautarea publica OLX (vezi adapters/olx/listing_search.py). */
+export interface ListingSearchResult {
+  id: string | null;
   title: string;
-  url: string;
+  price_text: string | null;
   price: number | null;
-  currency: string;
-  description: string;
-  status: "de_verificat" | "verificat" | "fals_positiv";
-  created_at: string;
-  score: number;
-  signals: SuspiciousSignal[];
-  explanation: string;
-  reason: string;
-  suggested_message: string;
+  currency: string | null;
+  location_date: string | null;
+  url: string;
+  seller_name: string | null;
 }
 
-export interface SuspiciousRules {
-  watched_titles: string;
-  suspicious_terms: string;
-  max_price: number | null;
-  selected_reasons: ("pret_redus" | "plata_avans" | "contact_extern" | "descriere_suspecta")[];
-  reason: string;
-  message_template: string;
-}
-
-export interface SuspiciousListingsData {
-  account_id: string;
-  account_label: string;
-  rules: SuspiciousRules;
-  listings: SuspiciousListing[];
+export interface ListingSearchResponse {
+  query: string;
+  /** cate anunturi din pagina de rezultate au fost verificate individual (limit) */
+  checked: number;
+  /** cate au fost excluse pentru ca par sa fie ale conturilor tale conectate */
+  excluded_own: number;
+  listings: ListingSearchResult[];
 }
 
 /** Rezultatul unui test de conectivitate prin proxy (catre OLX). */

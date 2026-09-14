@@ -28,8 +28,11 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
+from playwright.sync_api import sync_playwright
 
 import config
+from adapters.olx.browser_client import install_playwright_browsers
+from adapters.olx.listing_search import fetch_seller_name, parse_search_results, search_url
 from core.accounts import (
     ACCOUNTS_PATH,
     DEFAULT_SETTINGS,
@@ -50,13 +53,12 @@ from core.accounts import (
     migrate_global_data_to_account,
     migrate_legacy_profile,
     migrate_legacy_proxies,
-    read_bot_heartbeat,
     read_marker,
     save_accounts,
     save_settings,
-    write_bot_heartbeat,
 )
 from core.finance import build_finance_report, normalize_transaction
+from core.fingerprint import LAUNCH_ARGS
 from core.message_handler import MessageHandler
 from core.product_schema import empty_product, migrate_product
 from core.proxies import (
@@ -73,8 +75,6 @@ from core.proxies import (
 )
 from core.proxies import assigned_account as proxy_assigned_account
 from core.seller_info import DEFAULT_SELLER_INFO, normalize as normalize_seller
-from core.suspicious_listing import default_rules, evaluate_listing
-from generate_docker_compose import build_compose_yaml, service_name
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -444,65 +444,16 @@ class BotRunner:
     def status(self) -> dict:
         account = self.account()
         label = account_display_name(account) if account else self.account_id
-        if self.running:
-            return {
-                "account_id": self.account_id,
-                "account_label": label,
-                "running": True,
-                "stopping": self.stopping,
-                "last_poll": self.last_poll,
-                "active_llm": self.active_llm,
-                "errors_today": self.errors_for_today(),
-                "last_error": self.last_error,
-                "source": "process",
-            }
-        # niciun thread local — poate rula ca proces extern (container Docker
-        # pornit manual cu `docker compose up <id>`, vezi bot_worker.py). El
-        # scrie periodic un heartbeat pe disc; il aratam doar daca e recent,
-        # ca sa nu pretindem ca ruleaza un container mort de mult.
-        external = read_bot_heartbeat(self.account_id)
-        if external:
-            return {
-                "account_id": self.account_id,
-                "account_label": label,
-                "running": bool(external.get("running")),
-                "stopping": False,
-                "last_poll": external.get("last_poll"),
-                "active_llm": external.get("active_llm"),
-                "errors_today": external.get("errors_today", 0),
-                "last_error": external.get("last_error"),
-                "source": "container",
-            }
         return {
             "account_id": self.account_id,
             "account_label": label,
-            "running": False,
-            "stopping": False,
+            "running": self.running,
+            "stopping": self.stopping,
             "last_poll": self.last_poll,
-            "active_llm": None,
+            "active_llm": self.active_llm if self.running else None,
             "errors_today": self.errors_for_today(),
             "last_error": self.last_error,
-            "source": "process",
         }
-
-
-def _guard_external_running(account_id: str) -> None:
-    """Ridica 409 daca un proces extern (container Docker, vezi
-    bot_worker.py) tine deja deschis profilul de browser al contului.
-
-    Chromium nu accepta doua procese pe acelasi profil — a porni un thread
-    local peste un container deja pornit ar bloca ambele instante in loc sa
-    raspunda la mesaje.
-    """
-    external = read_bot_heartbeat(account_id)
-    if external and external.get("running"):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Acest cont rulează deja într-un container extern "
-                f"(docker compose stop {account_id} ca să-l oprești de-acolo)."
-            ),
-        )
 
 
 class BotFleet:
@@ -538,9 +489,8 @@ class BotFleet:
         return any(r.running for r in self.existing())
 
     def start_account(self, account_id: str) -> BotRunner:
-        # Verificarea si pornirea raman atomice intre cereri simultane.
+        # Pornirea ramane atomica intre cereri simultane.
         with self._start_lock:
-            _guard_external_running(account_id)
             runner = self.get(account_id)
             runner.start()
             return runner
@@ -562,13 +512,6 @@ class BotFleet:
             if login_launcher.running and login_launcher.account_id == account["id"]:
                 logger.info(
                     "Sar peste contul {} — are fereastra de login deschisa.",
-                    account_display_name(account),
-                )
-                continue
-            external = read_bot_heartbeat(account["id"])
-            if external and external.get("running"):
-                logger.info(
-                    "Sar peste contul {} — ruleaza deja intr-un container extern.",
                     account_display_name(account),
                 )
                 continue
@@ -618,7 +561,6 @@ class BotFleet:
 
 fleet = BotFleet()
 _finance_write_lock = threading.Lock()
-_suspicious_listings_lock = threading.Lock()
 
 app = FastAPI(title="OLX Bot API")
 app.add_middleware(
@@ -630,115 +572,73 @@ app.add_middleware(
 
 
 # --------------------------------------------------------------------- #
-# anunturi suspecte (analiza asistata, fara raportare automata)
+# cautare anunturi OLX (publica, fara login) — vezi adapters/olx/listing_search.py
 # --------------------------------------------------------------------- #
 
-def _suspicious_path(account_id: str) -> Path:
-    return account_data_dir(account_id) / "suspicious_listings.json"
+@app.get("/api/listing-search")
+def search_listings(q: str, limit: int = 20):
+    """Cauta pe OLX.ro anunturi al caror titlu contine `q`, excluzand
+    anunturile care par sa fie ale conturilor tale conectate.
 
+    Excluderea se face dupa numele public de vanzator (afisat pe pagina de
+    detaliu a fiecarui anunt), comparat cu numele deja cunoscute ale
+    conturilor tale (salvate local la login — vezi core/accounts.py).
 
-def _read_suspicious(account_id: str) -> dict:
-    path = _suspicious_path(account_id)
-    if not path.exists():
-        return {"rules": default_rules(), "listings": []}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return {"rules": {**default_rules(), **(data.get("rules") or {})}, "listings": data.get("listings") or []}
-    except (OSError, json.JSONDecodeError):
-        return {"rules": default_rules(), "listings": []}
+    Public, fara nicio sesiune OLX — nu foloseste profilul/proxy-ul vreunui
+    cont. `limit` plafoneaza cate anunturi verificam individual (o pagina de
+    detaliu per candidat), ca cererea sa nu dureze nelimitat la cautari cu
+    multe rezultate — o pagina de rezultate OLX are ~51 anunturi.
+    """
+    query = (q or "").strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="Introdu un titlu de cautat.")
+    limit = max(1, min(limit, 51))
 
+    own_names = {
+        name.strip().lower()
+        for account in load_accounts()["accounts"]
+        if account_connected(account)
+        for name in [read_marker(account).get("name")]
+        if name
+    }
 
-def _write_suspicious(account_id: str, data: dict) -> None:
-    path = _suspicious_path(account_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(".tmp")
-    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(path)
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS)
+        except Exception as e:
+            if "Executable doesn't exist" not in str(e):
+                raise
+            install_playwright_browsers()
+            browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS)
+        try:
+            context = browser.new_context(locale="ro-RO", timezone_id="Europe/Bucharest")
+            page = context.new_page()
+            try:
+                page.goto(search_url(query), wait_until="domcontentloaded", timeout=20000)
+                candidates = parse_search_results(page)[:limit]
+            except Exception as e:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Nu am putut încărca rezultatele de pe OLX: {e}",
+                )
 
+            listings = []
+            excluded_own = 0
+            for item in candidates:
+                seller = fetch_seller_name(page, item["url"])
+                if seller and seller.strip().lower() in own_names:
+                    excluded_own += 1
+                    continue
+                listings.append({**item, "seller_name": seller})
+        finally:
+            browser.close()
 
-@app.get("/api/suspicious-listings")
-def get_suspicious_listings(account_id: str | None = None):
-    account = _target_account(account_id)
-    data = _read_suspicious(account["id"])
-    return data | {"account_id": account["id"], "account_label": account_display_name(account)}
-
-
-@app.put("/api/suspicious-listings/rules")
-def save_suspicious_rules(rules: dict, account_id: str | None = None):
-    account = _target_account(account_id)
-    with _suspicious_listings_lock:
-        data = _read_suspicious(account["id"])
-        data["rules"] = {**default_rules(), **{k: rules[k] for k in default_rules() if k in rules}}
-        data["listings"] = [evaluate_listing(item, data["rules"]) for item in data["listings"]]
-        _write_suspicious(account["id"], data)
-    return data
-
-
-@app.post("/api/suspicious-listings")
-def add_suspicious_listing(listing: dict, account_id: str | None = None):
-    account = _target_account(account_id)
-    title = str(listing.get("title") or "").strip()
-    if not title:
-        raise HTTPException(status_code=422, detail="Titlul anunțului este obligatoriu.")
-    with _suspicious_listings_lock:
-        data = _read_suspicious(account["id"])
-        candidate = {
-            "id": f"listing_{uuid.uuid4().hex[:10]}", "title": title,
-            "url": str(listing.get("url") or "").strip(),
-            "price": listing.get("price"), "currency": str(listing.get("currency") or "RON").upper(),
-            "description": str(listing.get("description") or "").strip(),
-            "status": "de_verificat", "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        evaluated = evaluate_listing(candidate, data["rules"])
-        data["listings"].insert(0, evaluated)
-        _write_suspicious(account["id"], data)
-    return evaluated
-
-
-@app.put("/api/suspicious-listings/{listing_id}/status")
-def set_suspicious_listing_status(listing_id: str, body: dict, account_id: str | None = None):
-    status = body.get("status")
-    if status not in ("de_verificat", "verificat", "fals_positiv"):
-        raise HTTPException(status_code=422, detail="Stare invalidă.")
-    account = _target_account(account_id)
-    with _suspicious_listings_lock:
-        data = _read_suspicious(account["id"])
-        item = next((x for x in data["listings"] if x.get("id") == listing_id), None)
-        if item is None:
-            raise HTTPException(status_code=404, detail="Anunț inexistent")
-        item["status"] = status
-        _write_suspicious(account["id"], data)
-    return item
-
-
-@app.put("/api/suspicious-listings/{listing_id}/message")
-def set_suspicious_listing_message(listing_id: str, body: dict, account_id: str | None = None):
-    """Salveaza mesajul ajustat de utilizator; nu il transmite pe OLX."""
-    message = str(body.get("suggested_message") or "").strip()
-    if not message:
-        raise HTTPException(status_code=422, detail="Mesajul nu poate fi gol.")
-    account = _target_account(account_id)
-    with _suspicious_listings_lock:
-        data = _read_suspicious(account["id"])
-        item = next((x for x in data["listings"] if x.get("id") == listing_id), None)
-        if item is None:
-            raise HTTPException(status_code=404, detail="Anunț inexistent")
-        item["suggested_message"] = message[:2000]
-        _write_suspicious(account["id"], data)
-    return item
-
-
-@app.delete("/api/suspicious-listings/{listing_id}")
-def delete_suspicious_listing(listing_id: str, account_id: str | None = None):
-    account = _target_account(account_id)
-    with _suspicious_listings_lock:
-        data = _read_suspicious(account["id"])
-        previous = len(data["listings"])
-        data["listings"] = [x for x in data["listings"] if x.get("id") != listing_id]
-        if len(data["listings"]) == previous:
-            raise HTTPException(status_code=404, detail="Anunț inexistent")
-        _write_suspicious(account["id"], data)
-    return {"ok": True}
+    return {
+        "query": query,
+        "checked": len(candidates),
+        "excluded_own": excluded_own,
+        "listings": listings,
+    }
 
 
 # --------------------------------------------------------------------- #
@@ -1276,7 +1176,6 @@ def olx_login():
     account = active_account(accounts)
     if account is None:
         account = create_account(accounts)
-    _guard_external_running(account["id"])
     # botul tine profilul contului deschis headless — oprim DOAR runner-ul
     # acestui cont (Chromium nu accepta doua procese pe acelasi profil);
     # celelalte conturi continua sa raspunda
@@ -1298,7 +1197,6 @@ def olx_login_account(account_id: str):
             detail="O fereastră de login e deja deschisă — termin-o pe aceea întâi.",
         )
     account = _account_or_404(account_id)
-    _guard_external_running(account_id)
     # botul acestui cont tine profilul deschis headless; Chromium nu accepta
     # doua procese pe acelasi profil, deci il oprim doar pe el
     fleet.stop_account(account_id, wait=True)
@@ -1324,10 +1222,10 @@ def add_olx_account(body: dict | None = None):
 
 
 def _restart_running_account(account_id: str) -> str | None:
-    """Reporneste botul contului daca ruleaza (thread local sau container
-    Docker), ca sa preia imediat proxy-ul (sau lipsa lui) tocmai schimbat —
-    userul nu mai are nimic de facut dupa ce salveaza/asigneaza un proxy.
-    Intoarce "thread" | "docker" | None (nu rula nimic de repornit)."""
+    """Reporneste botul contului daca ruleaza ca thread local, ca sa preia
+    imediat proxy-ul (sau lipsa lui) tocmai schimbat — userul nu mai are
+    nimic de facut dupa ce salveaza/asigneaza un proxy.
+    Intoarce "thread" | None (nu rula nimic de repornit)."""
     runner = fleet.get(account_id)
     if runner.running:
         try:
@@ -1340,18 +1238,6 @@ def _restart_running_account(account_id: str) -> str | None:
                 account_id, e,
             )
             return None
-    heartbeat = read_bot_heartbeat(account_id)
-    if heartbeat and heartbeat.get("running") and _docker_available()["available"]:
-        with _docker_jobs_lock:
-            existing_job = _docker_jobs.get(account_id)
-            if not existing_job or existing_job.get("done"):
-                _docker_jobs[account_id] = {
-                    "step": "în așteptare...", "done": False, "error": None, "log_tail": "",
-                }
-                threading.Thread(
-                    target=_run_docker_restart, args=(account_id,), daemon=True
-                ).start()
-                return "docker"
     return None
 
 
@@ -1546,254 +1432,6 @@ def delete_proxy_endpoint(proxy_id: str, force: bool = False):
     return {"ok": True}
 
 
-# --------------------------------------------------------------------- #
-# control Docker per cont — pornire/oprire in container, direct din dashboard
-#
-# Dashboard-ul (acest proces) ruleaza pe Windows, in afara Docker-ului —
-# apeleaza `docker compose` prin subprocess, la fel cum apeleaza login.py.
-# build+up dureaza cateva minute la prima rulare (descarca imaginea de baza),
-# deci ruleaza intr-un thread de fundal, cu progres urmarit in _docker_jobs —
-# acelasi tipar ca la descarcarea modelelor Ollama (_pull_jobs) mai jos.
-# --------------------------------------------------------------------- #
-
-COMPOSE_PATH = PROJECT_DIR / "docker-compose.yml"
-DOCKER_BUILD_TIMEOUT = 1800  # 30 min — prima rulare descarca imaginea de baza (~1-2GB)
-DOCKER_UP_TIMEOUT = 120
-DOCKER_STOP_TIMEOUT = 60
-
-_docker_jobs: dict[str, dict] = {}
-_docker_jobs_lock = threading.Lock()
-_docker_daemon_cache: dict = {"at": 0.0, "available": None, "detail": None}
-DOCKER_DAEMON_CACHE_TTL = 10  # secunde — nu bate `docker info` la fiecare cerere a UI-ului
-
-
-def _docker_available() -> dict:
-    """{"available": bool, "detail": str | None} — daca Docker Desktop nu
-    ruleaza sau `docker` nu e instalat, UI-ul arata mesajul clar in loc de
-    o eroare criptica la prima incercare de pornire."""
-    now = time.time()
-    if (
-        _docker_daemon_cache["available"] is not None
-        and now - _docker_daemon_cache["at"] < DOCKER_DAEMON_CACHE_TTL
-    ):
-        return {
-            "available": _docker_daemon_cache["available"],
-            "detail": _docker_daemon_cache["detail"],
-        }
-    try:
-        result = subprocess.run(
-            ["docker", "info"], capture_output=True, text=True, timeout=5,
-            cwd=str(PROJECT_DIR),
-        )
-        available = result.returncode == 0
-        detail = None if available else (
-            "Docker e instalat, dar daemonul nu răspunde — pornește Docker Desktop."
-        )
-    except FileNotFoundError:
-        available, detail = False, (
-            "Comanda `docker` nu a fost găsită — instalează Docker Desktop."
-        )
-    except Exception as e:
-        available, detail = False, f"Nu am putut verifica Docker: {e}"
-    _docker_daemon_cache.update(at=now, available=available, detail=detail)
-    return {"available": available, "detail": detail}
-
-
-def _set_docker_job(account_id: str, **fields) -> None:
-    with _docker_jobs_lock:
-        job = _docker_jobs.setdefault(account_id, {})
-        job.update(fields)
-
-
-def _run_compose(args: list[str], timeout: float) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["docker", "compose", *args],
-        capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR),
-    )
-
-
-def _log_tail(result: subprocess.CompletedProcess, lines: int = 30) -> str:
-    text = (result.stderr or result.stdout or "").strip()
-    return "\n".join(text.splitlines()[-lines:])
-
-
-def _run_docker_start(account_id: str) -> None:
-    svc = service_name(account_id)
-    try:
-        runner = fleet.get(account_id)
-        if runner.running:
-            _set_docker_job(account_id, step="opresc botul local (rula ca thread)...")
-            fleet.stop_account(account_id, wait=True)
-
-        _set_docker_job(account_id, step="generez docker-compose.yml...")
-        yaml_text, _, _ = build_compose_yaml()
-        COMPOSE_PATH.write_text(yaml_text, encoding="utf-8")
-
-        _set_docker_job(
-            account_id,
-            step="construiesc imaginea (poate dura câteva minute la prima rulare)...",
-        )
-        build = _run_compose(["build", svc], timeout=DOCKER_BUILD_TIMEOUT)
-        if build.returncode != 0:
-            _set_docker_job(
-                account_id, step="eșuat", done=True,
-                error="Construirea imaginii a eșuat.", log_tail=_log_tail(build),
-            )
-            return
-
-        _set_docker_job(account_id, step="pornesc containerul...")
-        up = _run_compose(["up", "-d", svc], timeout=DOCKER_UP_TIMEOUT)
-        if up.returncode != 0:
-            _set_docker_job(
-                account_id, step="eșuat", done=True,
-                error="Pornirea containerului a eșuat.", log_tail=_log_tail(up),
-            )
-            return
-
-        _set_docker_job(account_id, step="pornit", done=True, error=None, log_tail="")
-        logger.info("Container Docker pornit pentru contul {}.", account_id)
-    except subprocess.TimeoutExpired:
-        _set_docker_job(
-            account_id, step="eșuat", done=True,
-            error="A durat prea mult (timeout) — încearcă din nou.", log_tail="",
-        )
-    except FileNotFoundError:
-        _set_docker_job(
-            account_id, step="eșuat", done=True,
-            error="Comanda `docker` nu a fost găsită — instalează Docker Desktop.",
-            log_tail="",
-        )
-    except Exception as e:
-        _set_docker_job(account_id, step="eșuat", done=True, error=str(e), log_tail="")
-        logger.error("Pornirea in Docker a esuat pentru {}: {}", account_id, e)
-
-
-def _run_docker_stop(account_id: str) -> None:
-    svc = service_name(account_id)
-    try:
-        _set_docker_job(account_id, step="opresc containerul...")
-        result = _run_compose(["stop", svc], timeout=DOCKER_STOP_TIMEOUT)
-        if result.returncode != 0:
-            _set_docker_job(
-                account_id, step="eșuat", done=True,
-                error="Oprirea containerului a eșuat.", log_tail=_log_tail(result),
-            )
-            return
-        _set_docker_job(account_id, step="oprit", done=True, error=None, log_tail="")
-        logger.info("Container Docker oprit pentru contul {}.", account_id)
-    except Exception as e:
-        _set_docker_job(account_id, step="eșuat", done=True, error=str(e), log_tail="")
-        logger.error("Oprirea containerului Docker a esuat pentru {}: {}", account_id, e)
-
-
-def _run_docker_restart(account_id: str) -> None:
-    """Opreste containerul (daca ruleaza) si il porneste din nou — util dupa
-    ce schimbi setarile contului (ex. modelul LLM) din dashboard: bot_worker.py
-    le citeste o singura data la pornire, nu le reincarca din mers cat timp
-    ruleaza (la fel ca BotRunner-ul thread-based), deci setarile noi se aplica
-    doar dupa un restart efectiv.
-    """
-    svc = service_name(account_id)
-    try:
-        _set_docker_job(account_id, step="opresc containerul (restart)...")
-        # poate esua daca nu ruleaza deja (nimic de oprit) — nu e o problema,
-        # continuam oricum cu pornirea
-        _run_compose(["stop", svc], timeout=DOCKER_STOP_TIMEOUT)
-    except Exception as e:
-        logger.debug("Restart Docker: oprirea nu a fost necesara/a esuat pentru {}: {}", account_id, e)
-    _run_docker_start(account_id)
-
-
-@app.get("/api/docker/status")
-def docker_status():
-    return _docker_available()
-
-
-@app.get("/api/docker/accounts")
-def docker_accounts_status():
-    """Starea Docker a fiecarui cont: job in curs (daca exista) + daca un
-    container extern raporteaza ca ruleaza (heartbeat-ul din bot_worker.py)."""
-    with _docker_jobs_lock:
-        jobs = {k: dict(v) for k, v in _docker_jobs.items()}
-    result = []
-    for account in load_accounts()["accounts"]:
-        heartbeat = read_bot_heartbeat(account["id"])
-        result.append({
-            "account_id": account["id"],
-            "service_name": service_name(account["id"]),
-            "container_running": bool(heartbeat and heartbeat.get("running")),
-            "job": jobs.get(account["id"]),
-        })
-    return result
-
-
-@app.post("/api/docker/accounts/{account_id}/start")
-def docker_start_account(account_id: str):
-    account = _account_or_404(account_id)
-    if not account_connected(account):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Contul „{account_display_name(account)}” nu e conectat "
-                "— fă login întâi (containerul nu poate rezolva CAPTCHA-ul)."
-            ),
-        )
-    availability = _docker_available()
-    if not availability["available"]:
-        raise HTTPException(status_code=503, detail=availability["detail"])
-    with _docker_jobs_lock:
-        existing = _docker_jobs.get(account_id)
-        if existing and not existing.get("done"):
-            return {"started": False, "already_running": True, "job": existing}
-        _docker_jobs[account_id] = {
-            "step": "în așteptare...", "done": False, "error": None, "log_tail": "",
-        }
-    threading.Thread(target=_run_docker_start, args=(account_id,), daemon=True).start()
-    return {"started": True}
-
-
-@app.post("/api/docker/accounts/{account_id}/stop")
-def docker_stop_account(account_id: str):
-    _account_or_404(account_id)
-    availability = _docker_available()
-    if not availability["available"]:
-        raise HTTPException(status_code=503, detail=availability["detail"])
-    with _docker_jobs_lock:
-        existing = _docker_jobs.get(account_id)
-        if existing and not existing.get("done"):
-            return {"stopped": False, "already_running": True, "job": existing}
-        _docker_jobs[account_id] = {
-            "step": "în așteptare...", "done": False, "error": None, "log_tail": "",
-        }
-    threading.Thread(target=_run_docker_stop, args=(account_id,), daemon=True).start()
-    return {"stopped": True}
-
-
-@app.post("/api/docker/accounts/{account_id}/restart")
-def docker_restart_account(account_id: str):
-    account = _account_or_404(account_id)
-    if not account_connected(account):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Contul „{account_display_name(account)}” nu e conectat "
-                "— fă login întâi."
-            ),
-        )
-    availability = _docker_available()
-    if not availability["available"]:
-        raise HTTPException(status_code=503, detail=availability["detail"])
-    with _docker_jobs_lock:
-        existing = _docker_jobs.get(account_id)
-        if existing and not existing.get("done"):
-            return {"started": False, "already_running": True, "job": existing}
-        _docker_jobs[account_id] = {
-            "step": "în așteptare...", "done": False, "error": None, "log_tail": "",
-        }
-    threading.Thread(target=_run_docker_restart, args=(account_id,), daemon=True).start()
-    return {"restarted": True}
-
-
 @app.post("/api/olx/accounts/{account_id}/activate")
 def activate_olx_account(account_id: str):
     """Schimba contul selectat in dashboard — cel ale carui produse si setari
@@ -1825,7 +1463,6 @@ def sign_out_olx_account(account_id: str, purge: bool = False):
     account = find_account(accounts, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="Cont inexistent")
-    _guard_external_running(account_id)
     # botul acestui cont tine profilul deschis — nu putem sterge peste el
     fleet.stop_account(account_id, wait=True)
     # profilul contine si markerul de login => contul apare "neconectat"

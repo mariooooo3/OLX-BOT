@@ -29,11 +29,12 @@ from playwright.sync_api import sync_playwright
 from adapters.olx.browser_client import install_playwright_browsers
 from adapters.olx.session_check import (
     ACCOUNT_URL,
+    accept_cookies,
     dom_logged_in,
     fetch_me,
     login_form_on_screen,
 )
-from core.fingerprint import init_script_for, profile_for
+from core.fingerprint import LAUNCH_ARGS, init_script_for, profile_for
 
 load_dotenv(override=True)
 
@@ -163,7 +164,7 @@ def main() -> None:
             viewport=fingerprint["viewport"],
             user_agent=fingerprint["user_agent"],
             device_scale_factor=fingerprint["device_scale_factor"],
-            args=["--disable-blink-features=AutomationControlled"],
+            args=LAUNCH_ARGS,
         )
         if proxy and proxy.get("server"):
             launch_kwargs["proxy"] = {
@@ -196,6 +197,12 @@ def main() -> None:
             logger.info("Esti deja logat din sesiuni anterioare.")
         else:
             page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
+            # pe un profil nou (fara cookie-uri), OLX arata mereu bannerul
+            # OneTrust la prima vizita — backdrop-ul lui poate acoperi
+            # formularul de dedesubt si intercepta click-urile, desi
+            # campurile raman perfect vizibile (exact simptomul "nu pot
+            # apasa campurile" fara nicio eroare vizibila)
+            accept_cookies(page)
             print("\n" + "=" * 64)
             print("  LOGHEAZA-TE IN FEREASTRA DESCHISA")
             print("  - completeaza email + parola")

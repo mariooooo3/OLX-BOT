@@ -82,7 +82,7 @@ Se deschide automat dashboard-ul în browser la `http://localhost:8080`.
 > original nu se partajează. Datele (produse, conversații, sesiunea de
 > login) rămân locale pe calculatorul respectiv și nu ajung pe git.
 
-## Mai multe conturi, fiecare cu IP propriu (proxy + Docker)
+## Mai multe conturi, fiecare cu IP propriu (proxy)
 
 ### De ce ai nevoie de asta
 
@@ -97,12 +97,10 @@ proxy dedicat lui.
 - **Amprenta de browser** — fiecare cont primește automat propriul
   user-agent, rezoluție de ecran și placă video „raportată", mereu aceeași
   pentru același cont, diferită față de celelalte conturi. Se aplică oriunde
-  rulează botul (dashboard, container Docker, fereastra de login).
+  rulează botul (dashboard, fereastra de login).
 - **Aplicarea proxy-ului** — odată ce ai lipit adresa în dashboard, botul
-  (sau containerul lui Docker, dacă îl folosești) **se repornește automat**
-  și preia noul proxy imediat. Nu trebuie să opreşti/porneşti nimic manual.
-- **Fișierul `docker-compose.yml`** — dacă alegi să muți un cont în Docker,
-  fișierul se generează/actualizează singur din contul tău, la un click.
+  **se repornește automat** și preia noul proxy imediat. Nu trebuie să
+  opreşti/porneşti nimic manual.
 
 ### Ce trebuie să faci tu, pas cu pas
 
@@ -113,19 +111,13 @@ proxy dedicat lui.
 2. În dashboard, din panoul de conturi, apasă **„Proxy"** pe contul dorit și
    completează adresa (`socks5://host:port` sau `http://host:port`) +
    utilizator/parolă, dacă proxy-ul le cere.
-3. Apasă **Salvează**. Atât — dacă botul acelui cont rulează deja (local sau
-   în container Docker), se repornește singur și iese imediat prin noul
-   proxy. Dacă nu rulează încă, proxy-ul se aplică automat la prima pornire.
-4. (Opțional) Dacă vrei izolare completă și la nivel de proces, nu doar de
-   rețea, apasă **„Pornește în Docker"** pe acel cont — fiecare cont mutat în
-   Docker rulează într-un container separat, cu propriul lui ciclu de viață,
-   independent de celelalte. Detalii și pornire din linia de comandă:
-   [docs/docker-multi-cont.md](docs/docker-multi-cont.md).
+3. Apasă **Salvează**. Atât — dacă botul acelui cont rulează deja, se
+   repornește singur și iese imediat prin noul proxy. Dacă nu rulează încă,
+   proxy-ul se aplică automat la prima pornire.
 
-> **Login-ul (cu CAPTCHA) se face mereu din dashboard, pe Windows** — nu din
-> container. Dacă vrei ca sesiunea de login și botul să iasă pe același IP
-> (recomandat), setează proxy-ul contului **înainte** de a apăsa
-> „Conectează cont OLX".
+> **Login-ul (cu CAPTCHA) se face mereu din dashboard.** Dacă vrei ca sesiunea
+> de login și botul să iasă pe același IP (recomandat), setează proxy-ul
+> contului **înainte** de a apăsa „Conectează cont OLX".
 
 ### Atenție — folosește mereu ACELAȘI proxy pentru un cont
 

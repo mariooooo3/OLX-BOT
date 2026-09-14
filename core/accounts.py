@@ -1,11 +1,7 @@
-"""Registrul de conturi OLX + setarile lor — folosit de server.py (dashboard)
-SI de bot_worker.py (procesul de bot per cont, care poate rula intr-un
-container Docker separat).
+"""Registrul de conturi OLX + setarile lor — folosit de server.py (dashboard).
 
 Extras din server.py ca sa nu existe doua copii ale aceleiasi logici: un
-cont, o sesiune, un profil de browser, niste setari — indiferent daca botul
-lui ruleaza ca thread in acelasi proces cu dashboard-ul (implicit) sau ca
-proces separat, eventual containerizat, cu propriul proxy de iesire.
+cont, o sesiune, un profil de browser, niste setari, un proxy de iesire.
 """
 import json
 import uuid
@@ -29,9 +25,6 @@ ACCOUNTS_DATA_ROOT = Path("data/accounts")
 ACCOUNTS_PATH = Path("data/accounts.json")
 # marker scris de login.py in profilul contului dupa un login confirmat
 SESSION_MARKER_NAME = "olx_session.json"
-# starea scrisa de un proces de bot EXTERN (container) — vezi
-# write_bot_heartbeat / read_bot_heartbeat mai jos
-BOT_STATUS_NAME = "bot_status.json"
 
 DEFAULT_SETTINGS = {
     "poll_interval_seconds": config.POLL_INTERVAL_SECONDS,
@@ -254,8 +247,7 @@ def create_account(accounts: dict, label: str | None = None) -> dict:
     account = {
         "id": account_id,
         "label": label,
-        # .as_posix(): mereu cu '/', portabil intre Windows (dashboard,
-        # login.py) si Linux (container Docker, vezi bot_worker.py) —
+        # .as_posix(): mereu cu '/', portabil intre Windows si Linux —
         # vezi si account_profile_dir()
         "profile_dir": profile_dir.as_posix(),
         "color": _next_color(accounts),
@@ -317,53 +309,3 @@ def migrate_account_colors() -> None:
     for position, account in enumerate(accounts["accounts"]):
         account.setdefault("color", position % ACCOUNT_COLORS)
     save_accounts(accounts)
-
-
-# --------------------------------------------------------------------- #
-# stare externa a botului (container Docker per cont)
-#
-# Un cont poate rula fie ca thread in procesul dashboard-ului (implicit),
-# fie ca proces separat (eventual container) pornit manual cu
-# `docker compose up <account_id>` — vezi bot_worker.py. In al doilea caz,
-# dashboard-ul nu porneste/opreste nimic (control manual), dar tot trebuie
-# sa arate starea: procesul extern scrie periodic un heartbeat pe disc, pe
-# care dashboard-ul il citeste cand niciun thread local nu ruleaza pentru
-# contul respectiv.
-# --------------------------------------------------------------------- #
-
-def bot_status_path(account_id: str) -> Path:
-    return account_data_dir(account_id) / BOT_STATUS_NAME
-
-
-def write_bot_heartbeat(account_id: str, **fields) -> None:
-    """Apelata de bot_worker.py la fiecare ciclu de polling, si o data la
-    oprire (running=False), ca dashboard-ul sa reflecte starea imediat in
-    loc sa astepte expirarea heartbeat-ului."""
-    path = bot_status_path(account_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"updated_at": datetime.now(timezone.utc).isoformat(), **fields}
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
-
-
-def read_bot_heartbeat(account_id: str, max_age_seconds: float = 180) -> dict | None:
-    """Starea scrisa de procesul extern, doar daca e recenta.
-
-    O stare veche inseamna ca procesul a murit fara sa apuce sa scrie
-    running=False (container omorat brusc, host repornit) — mai bine o
-    ignoram decat sa aratam in dashboard un bot "pornit" care de fapt nu mai
-    exista.
-    """
-    path = bot_status_path(account_id)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        updated_at = datetime.fromisoformat(data["updated_at"])
-        age = (datetime.now(timezone.utc) - updated_at).total_seconds()
-        if age > max_age_seconds:
-            return None
-        return data
-    except Exception:
-        return None

@@ -20,11 +20,15 @@ LOGIN_FORM = (
     "input[name='password'], input[name='username'], "
     "[data-testid='login-submit-button']"
 )
-# element vizibil DOAR pentru utilizatori logati => confirmare pozitiva
-LOGGED_IN_MARKER = (
-    "[data-testid='myolx-link'], [data-testid='user-avatar'], "
-    "a[href*='logout'], a[href*='myaccount']"
-)
+# element vizibil DOAR pentru utilizatori logati => confirmare pozitiva.
+# DOAR data-testid-uri specifice componentei de user logat — NU selectori
+# largi de tipul a[href*='myaccount'] sau a[href*='logout']: verificat
+# practic (test de sarcina cu 9 proxy-uri concurente), un link generic din
+# navigare care contine "myaccount" in href poate exista si pe pagina
+# NElogata, inainte ca redirectul catre login.olx.ro sa se termine — un
+# selector asa de larg da fals-pozitiv "logat" exact cand pagina e prinsa
+# la mijloc de tranzitie (mult mai probabil sub proxy lent/incarcat).
+LOGGED_IN_MARKER = "[data-testid='myolx-link'], [data-testid='user-avatar']"
 COOKIE_ACCEPT = "#onetrust-accept-btn-handler"
 
 
@@ -75,16 +79,34 @@ def dom_logged_in(page) -> bool:
     """Fallback: navigheaza la /myaccount/ si cauta semne de user logat.
 
     Navigheaza! A se apela doar cand formularul de login nu e pe ecran.
+
+    Fail-closed: daca pagina nu apuca sa afiseze NICI formularul de login,
+    NICI un marker de user logat in timpul alocat (proxy lent/incarcat —
+    verificat practic la 9 conturi concurente), consideram "neconfirmat" =>
+    False, nu True. O pagina prinsa la mijloc de tranzitie (inainte ca
+    redirectul catre login.olx.ro sa se termine) nu e o dovada de login.
+
+    wait_until="networkidle", nu doar "domcontentloaded": shell-ul initial al
+    paginii /myaccount/ contine elementele de user (data-testid myolx-link /
+    user-avatar) INAINTE ca JS-ul sa determine ca nu esti logat si sa
+    redirectioneze catre login.olx.ro — verificat practic (9 proxy-uri
+    concurente: cele lente au prins exact acest interval si au raportat fals
+    "logat"). "networkidle" da timp cererii de verificare a autentificarii
+    sa se termine si redirectul sa apuce sa se produca inainte sa citim DOM-ul.
     """
     try:
-        page.goto(ACCOUNT_URL, wait_until="domcontentloaded")
+        page.goto(ACCOUNT_URL, wait_until="networkidle", timeout=20000)
         accept_cookies(page)
         try:
             page.wait_for_selector(
                 f"{LOGIN_FORM}, {LOGGED_IN_MARKER}", timeout=12000
             )
         except Exception:
-            pass
+            logger.debug(
+                "Nici formularul de login, nici un marker de user logat nu "
+                "au aparut la timp — consider sesiunea neconfirmata."
+            )
+            return False
         url = page.url.lower()
         if "login" in url or "/auth" in url:
             return False

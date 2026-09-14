@@ -6,7 +6,7 @@ import {
   Settings,
   Bot,
   ChartNoAxesCombined,
-  ShieldAlert,
+  Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -17,7 +17,7 @@ import { AccountScopeSwitcher } from "@/components/account-scope";
 import type { CSSProperties, ReactNode } from "react";
 
 type NavItem = {
-  to: "/" | "/conversations" | "/products" | "/finance" | "/suspicious-listings" | "/settings";
+  to: "/" | "/conversations" | "/products" | "/finance" | "/listing-search" | "/settings";
   label: string;
   icon: typeof LayoutDashboard;
   exact?: boolean;
@@ -28,7 +28,7 @@ const nav: NavItem[] = [
   { to: "/conversations", label: "Conversații", icon: MessagesSquare },
   { to: "/products", label: "Produse", icon: Package },
   { to: "/finance", label: "Gestiune", icon: ChartNoAxesCombined },
-  { to: "/suspicious-listings", label: "Verificări", icon: ShieldAlert },
+  { to: "/listing-search", label: "Căutare anunțuri", icon: Search },
   { to: "/settings", label: "Setări", icon: Settings },
 ];
 

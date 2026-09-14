@@ -12,9 +12,7 @@ import type {
   Proxy,
   ProxyFullTestResult,
   ProxyTestResult,
-  SuspiciousListing,
-  SuspiciousListingsData,
-  SuspiciousRules,
+  ListingSearchResponse,
 } from "./types";
 
 // Backend-ul FastAPI al botului (server.py). Configurabil prin VITE_API_URL.
@@ -102,59 +100,20 @@ export async function deleteFinanceTransaction(id: string, accountId?: string): 
   });
 }
 
-export async function getSuspiciousListings(accountId?: string): Promise<SuspiciousListingsData> {
-  return request<SuspiciousListingsData>(`/api/suspicious-listings${accountScope(accountId)}`);
-}
-
-export async function saveSuspiciousRules(
-  rules: SuspiciousRules,
-  accountId?: string,
-): Promise<SuspiciousListingsData> {
-  return request<SuspiciousListingsData>(
-    `/api/suspicious-listings/rules${accountScope(accountId)}`,
-    {
-      method: "PUT",
-      body: JSON.stringify(rules),
-    },
+/**
+ * Cauta pe OLX.ro anunturi al caror titlu contine `query`, excluzand cele
+ * ale conturilor tale conectate (vezi server.py:search_listings). Public,
+ * fara nicio sesiune — poate dura cateva zeci de secunde (deschide pagina
+ * de detaliu a fiecarui candidat ca sa afle vanzatorul), de-asta `limit`
+ * plafoneaza cate verificam.
+ */
+export async function searchListings(
+  query: string,
+  limit = 20,
+): Promise<ListingSearchResponse> {
+  return request<ListingSearchResponse>(
+    `/api/listing-search?q=${encodeURIComponent(query)}&limit=${limit}`,
   );
-}
-
-export async function addSuspiciousListing(
-  listing: Pick<SuspiciousListing, "title" | "url" | "price" | "currency" | "description">,
-  accountId?: string,
-): Promise<SuspiciousListing> {
-  return request<SuspiciousListing>(`/api/suspicious-listings${accountScope(accountId)}`, {
-    method: "POST",
-    body: JSON.stringify(listing),
-  });
-}
-
-export async function setSuspiciousListingStatus(
-  id: string,
-  status: SuspiciousListing["status"],
-  accountId?: string,
-): Promise<SuspiciousListing> {
-  return request<SuspiciousListing>(
-    `/api/suspicious-listings/${encodeURIComponent(id)}/status${accountScope(accountId)}`,
-    { method: "PUT", body: JSON.stringify({ status }) },
-  );
-}
-
-export async function saveSuspiciousListingMessage(
-  id: string,
-  suggestedMessage: string,
-  accountId?: string,
-): Promise<SuspiciousListing> {
-  return request<SuspiciousListing>(
-    `/api/suspicious-listings/${encodeURIComponent(id)}/message${accountScope(accountId)}`,
-    { method: "PUT", body: JSON.stringify({ suggested_message: suggestedMessage }) },
-  );
-}
-
-export async function deleteSuspiciousListing(id: string, accountId?: string): Promise<void> {
-  await request(`/api/suspicious-listings/${encodeURIComponent(id)}${accountScope(accountId)}`, {
-    method: "DELETE",
-  });
 }
 
 /**
@@ -321,7 +280,7 @@ export async function addOlxAccount(label?: string): Promise<{ id: string; label
 export interface AssignProxyResult {
   ok: boolean;
   has_proxy: boolean;
-  restarted: "thread" | "docker" | null;
+  restarted: "thread" | null;
   /** proxy-ul era deja alocat altui cont — a fost mutat aici, iar contul
    *  vechi a ramas fara proxy (repornit automat daca rula) */
   moved_from: { account_id: string; account_label: string } | null;
@@ -330,7 +289,7 @@ export interface AssignProxyResult {
 /**
  * Asigneaza (sau, cu `proxyId` null, dezasigneaza) un proxy din registrul
  * central (vezi getProxies()) contului dat. Daca botul acestui cont ruleaza
- * deja (thread local sau container Docker), serverul il repornește automat.
+ * deja, serverul il repornește automat.
  */
 export async function setAccountProxy(
   accountId: string,
@@ -398,71 +357,6 @@ export async function deleteProxy(proxyId: string, force = false): Promise<void>
   });
 }
 
-// --------------------------------------------------------------------- //
-// Docker — pornire/oprire in container, direct din dashboard
-// (server.py apeleaza `docker compose` in fundal; vezi docs/docker-multi-cont.md)
-// --------------------------------------------------------------------- //
-
-export interface DockerJob {
-  /** pasul curent, in romana, de afisat direct in UI (ex. "construiesc imaginea...") */
-  step: string;
-  done: boolean;
-  error: string | null;
-  /** ultimele linii din output-ul docker, utile la eroare */
-  log_tail: string;
-}
-
-export interface DockerAccountStatus {
-  account_id: string;
-  service_name: string;
-  /** heartbeat recent scris de container (bot_worker.py) — separat de `job`,
-   *  care e doar despre operatia de build/start/stop in curs */
-  container_running: boolean;
-  job: DockerJob | null;
-}
-
-export interface DockerStatus {
-  available: boolean;
-  /** motivul cand available=false (Docker Desktop oprit, neinstalat etc.) */
-  detail: string | null;
-}
-
-export async function getDockerStatus(): Promise<DockerStatus> {
-  return request<DockerStatus>("/api/docker/status");
-}
-
-export async function getDockerAccounts(): Promise<DockerAccountStatus[]> {
-  return request<DockerAccountStatus[]>("/api/docker/accounts");
-}
-
-/** Opreste botul local (daca rula ca thread), genereaza docker-compose.yml,
- *  construieste imaginea si porneste containerul — poate dura minute la
- *  prima rulare; urmareste progresul cu getDockerAccounts(). */
-export async function startAccountDocker(
-  accountId: string,
-): Promise<{ started: boolean; already_running?: boolean }> {
-  return request(`/api/docker/accounts/${encodeURIComponent(accountId)}/start`, {
-    method: "POST",
-  });
-}
-
-export async function stopAccountDocker(
-  accountId: string,
-): Promise<{ stopped: boolean; already_running?: boolean }> {
-  return request(`/api/docker/accounts/${encodeURIComponent(accountId)}/stop`, {
-    method: "POST",
-  });
-}
-
-/** Oprește și repornește containerul — necesar ca setările noi (ex. modelul
- *  LLM) să se aplice; bot_worker.py le citește o singură dată la pornire. */
-export async function restartAccountDocker(
-  accountId: string,
-): Promise<{ restarted: boolean; already_running?: boolean }> {
-  return request(`/api/docker/accounts/${encodeURIComponent(accountId)}/restart`, {
-    method: "POST",
-  });
-}
 
 export async function activateOlxAccount(
   id: string,

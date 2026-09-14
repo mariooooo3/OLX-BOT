@@ -9,22 +9,22 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as SuspiciousListingsRouteImport } from './routes/suspicious-listings'
 import { Route as SettingsRouteImport } from './routes/settings'
+import { Route as ListingSearchRouteImport } from './routes/listing-search'
 import { Route as FinanceRouteImport } from './routes/finance'
 import { Route as ConversationsRouteImport } from './routes/conversations'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ProductsIndexRouteImport } from './routes/products.index'
 import { Route as ProductsProductIdRouteImport } from './routes/products.$productId'
 
-const SuspiciousListingsRoute = SuspiciousListingsRouteImport.update({
-  id: '/suspicious-listings',
-  path: '/suspicious-listings',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ListingSearchRoute = ListingSearchRouteImport.update({
+  id: '/listing-search',
+  path: '/listing-search',
   getParentRoute: () => rootRouteImport,
 } as any)
 const FinanceRoute = FinanceRouteImport.update({
@@ -57,8 +57,8 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/conversations': typeof ConversationsRoute
   '/finance': typeof FinanceRoute
+  '/listing-search': typeof ListingSearchRoute
   '/settings': typeof SettingsRoute
-  '/suspicious-listings': typeof SuspiciousListingsRoute
   '/products/$productId': typeof ProductsProductIdRoute
   '/products/': typeof ProductsIndexRoute
 }
@@ -66,8 +66,8 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/conversations': typeof ConversationsRoute
   '/finance': typeof FinanceRoute
+  '/listing-search': typeof ListingSearchRoute
   '/settings': typeof SettingsRoute
-  '/suspicious-listings': typeof SuspiciousListingsRoute
   '/products/$productId': typeof ProductsProductIdRoute
   '/products': typeof ProductsIndexRoute
 }
@@ -76,8 +76,8 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/conversations': typeof ConversationsRoute
   '/finance': typeof FinanceRoute
+  '/listing-search': typeof ListingSearchRoute
   '/settings': typeof SettingsRoute
-  '/suspicious-listings': typeof SuspiciousListingsRoute
   '/products/$productId': typeof ProductsProductIdRoute
   '/products/': typeof ProductsIndexRoute
 }
@@ -87,8 +87,8 @@ export interface FileRouteTypes {
     | '/'
     | '/conversations'
     | '/finance'
+    | '/listing-search'
     | '/settings'
-    | '/suspicious-listings'
     | '/products/$productId'
     | '/products/'
   fileRoutesByTo: FileRoutesByTo
@@ -96,8 +96,8 @@ export interface FileRouteTypes {
     | '/'
     | '/conversations'
     | '/finance'
+    | '/listing-search'
     | '/settings'
-    | '/suspicious-listings'
     | '/products/$productId'
     | '/products'
   id:
@@ -105,8 +105,8 @@ export interface FileRouteTypes {
     | '/'
     | '/conversations'
     | '/finance'
+    | '/listing-search'
     | '/settings'
-    | '/suspicious-listings'
     | '/products/$productId'
     | '/products/'
   fileRoutesById: FileRoutesById
@@ -115,26 +115,26 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ConversationsRoute: typeof ConversationsRoute
   FinanceRoute: typeof FinanceRoute
+  ListingSearchRoute: typeof ListingSearchRoute
   SettingsRoute: typeof SettingsRoute
-  SuspiciousListingsRoute: typeof SuspiciousListingsRoute
   ProductsProductIdRoute: typeof ProductsProductIdRoute
   ProductsIndexRoute: typeof ProductsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/suspicious-listings': {
-      id: '/suspicious-listings'
-      path: '/suspicious-listings'
-      fullPath: '/suspicious-listings'
-      preLoaderRoute: typeof SuspiciousListingsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/settings': {
       id: '/settings'
       path: '/settings'
       fullPath: '/settings'
       preLoaderRoute: typeof SettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/listing-search': {
+      id: '/listing-search'
+      path: '/listing-search'
+      fullPath: '/listing-search'
+      preLoaderRoute: typeof ListingSearchRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/finance': {
@@ -179,8 +179,8 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ConversationsRoute: ConversationsRoute,
   FinanceRoute: FinanceRoute,
+  ListingSearchRoute: ListingSearchRoute,
   SettingsRoute: SettingsRoute,
-  SuspiciousListingsRoute: SuspiciousListingsRoute,
   ProductsProductIdRoute: ProductsProductIdRoute,
   ProductsIndexRoute: ProductsIndexRoute,
 }

@@ -11,13 +11,11 @@
 import { useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Box,
   Globe,
   KeyRound,
   Loader2,
   LogOut,
   Plus,
-  RotateCw,
   ShieldCheck,
   Trash2,
   UserPlus,
@@ -54,15 +52,10 @@ import {
   createProxy,
   deleteProxy,
   getBotStatus,
-  getDockerAccounts,
-  getDockerStatus,
   getProxies,
-  restartAccountDocker,
   setAccountProxy,
   signOutOlxAccount,
-  startAccountDocker,
   startOlxLoginForAccount,
-  stopAccountDocker,
   testProxy,
   testProxyFull,
   type OlxAccount,
@@ -112,58 +105,12 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
     (botStatus.data?.accounts ?? []).filter((a) => a.running).map((a) => a.account_id),
   );
 
-  // starea Docker: disponibilitatea daemonului + starea/jobul fiecarui cont.
-  // Poll rapid cat timp panoul e deschis, ca progresul build-ului (poate
-  // dura minute) sa se vada live, nu doar la refresh manual.
-  const dockerStatus = useQuery({
-    queryKey: ["dockerStatus"],
-    queryFn: getDockerStatus,
-    refetchInterval: open ? 5000 : false,
-  });
-  const dockerAccounts = useQuery({
-    queryKey: ["dockerAccounts"],
-    queryFn: getDockerAccounts,
-    refetchInterval: open ? 2500 : false,
-  });
-  const dockerByAccount = new Map((dockerAccounts.data ?? []).map((d) => [d.account_id, d]));
-
   // registrul central de proxy-uri — un singur loc de adevar, ca acelasi
   // proxy sa nu ajunga din greseala pe doua conturi (vezi core/proxies.py)
   const proxiesQ = useQuery({
     queryKey: ["proxies"],
     queryFn: getProxies,
     refetchInterval: proxyTarget ? 4000 : false,
-  });
-
-  const startDocker = useMutation({
-    mutationFn: (id: string) => startAccountDocker(id),
-    onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: ["dockerAccounts"] });
-      toast.info(
-        data.already_running
-          ? "O operație Docker e deja în curs pentru acest cont."
-          : "Pornesc containerul — poate dura câteva minute la prima rulare.",
-      );
-    },
-    onError: () => toast.error("Nu am putut porni containerul"),
-  });
-
-  const stopDocker = useMutation({
-    mutationFn: (id: string) => stopAccountDocker(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["dockerAccounts"] });
-      toast.info("Opresc containerul...");
-    },
-    onError: () => toast.error("Nu am putut opri containerul"),
-  });
-
-  const restartDocker = useMutation({
-    mutationFn: (id: string) => restartAccountDocker(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["dockerAccounts"] });
-      toast.info("Repornesc containerul — setările noi se aplică după ce pornește din nou.");
-    },
-    onError: () => toast.error("Nu am putut reporni containerul"),
   });
 
   // datele afisate peste tot depind de conturi, deci reincarcam tot
@@ -206,11 +153,7 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
     onSuccess: (data) => {
       invalidate();
       const restartNote =
-        data.restarted === "thread"
-          ? " — botul s-a repornit automat, se aplică deja"
-          : data.restarted === "docker"
-            ? " — containerul se repornește automat, se aplică imediat ce pornește"
-            : "";
+        data.restarted === "thread" ? " — botul s-a repornit automat, se aplică deja" : "";
       if (data.moved_from) {
         toast.info(
           `Proxy mutat aici — contul „${data.moved_from.account_label}” a rămas fără proxy.`,
@@ -291,13 +234,6 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
             </DialogDescription>
           </DialogHeader>
 
-          {dockerStatus.data && !dockerStatus.data.available ? (
-            <p className="rounded-lg bg-muted/50 px-3 py-2 text-[11px] text-muted-foreground">
-              Docker indisponibil{dockerStatus.data.detail ? `: ${dockerStatus.data.detail}` : ""}
-              {" — "}pornirea în container e dezactivată până repornești Docker Desktop.
-            </p>
-          ) : null}
-
           {accounts.length === 0 ? (
             <p className="py-4 text-sm text-muted-foreground">
               Niciun cont încă. Adaugă primul cont mai jos.
@@ -306,9 +242,6 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
             <ul className="space-y-2">
               {accounts.map((a) => {
                 const running = runningIds.has(a.id);
-                const docker = dockerByAccount.get(a.id);
-                const dockerJob = docker?.job && !docker.job.done ? docker.job : null;
-                const dockerError = docker?.job?.done ? docker.job.error : null;
                 return (
                   <li
                     key={a.id}
@@ -328,24 +261,7 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
                         {a.connected ? (
                           <StateChip ok={running} label={running ? "bot pornit" : "bot oprit"} />
                         ) : null}
-                        {docker?.container_running ? (
-                          <StateChip ok label="container Docker" />
-                        ) : null}
                       </div>
-                      {dockerJob ? (
-                        <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                          <Loader2 className="h-3 w-3 animate-spin" strokeWidth={1.5} />
-                          {dockerJob.step}
-                        </div>
-                      ) : null}
-                      {dockerError ? (
-                        <div
-                          className="mt-1 truncate text-[11px] text-red-600 dark:text-red-400"
-                          title={docker?.job?.log_tail || undefined}
-                        >
-                          Docker: {dockerError}
-                        </div>
-                      ) : null}
                     </div>
 
                     <div className="flex shrink-0 flex-col gap-1">
@@ -383,44 +299,6 @@ export function AccountsPanel({ children }: { children: ReactNode }) {
                         <Globe className="mr-1.5 h-3.5 w-3.5" strokeWidth={1.5} />
                         {a.has_proxy ? "Proxy" : "Fără proxy"}
                       </Button>
-                      {dockerStatus.data?.available && a.connected ? (
-                        docker?.container_running ? (
-                          <div className="flex gap-1">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 flex-1 justify-start px-2 text-xs"
-                              disabled={!!dockerJob || stopDocker.isPending}
-                              onClick={() => stopDocker.mutate(a.id)}
-                            >
-                              <Box className="mr-1.5 h-3.5 w-3.5" strokeWidth={1.5} />
-                              Oprește Docker
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 shrink-0"
-                              disabled={!!dockerJob || restartDocker.isPending}
-                              onClick={() => restartDocker.mutate(a.id)}
-                              title="Repornește containerul — necesar ca setările noi (ex. modelul LLM) să se aplice"
-                            >
-                              <RotateCw className="h-3.5 w-3.5" strokeWidth={1.5} />
-                            </Button>
-                          </div>
-                        ) : (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 justify-start px-2 text-xs"
-                            disabled={!!dockerJob || startDocker.isPending}
-                            onClick={() => startDocker.mutate(a.id)}
-                            title="Rulează botul acestui cont într-un container Docker separat"
-                          >
-                            <Box className="mr-1.5 h-3.5 w-3.5" strokeWidth={1.5} />
-                            Pornește în Docker
-                          </Button>
-                        )
-                      ) : null}
                       <Button
                         variant="ghost"
                         size="sm"
