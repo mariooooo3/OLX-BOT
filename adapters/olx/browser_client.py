@@ -288,7 +288,7 @@ class BrowserClient:
     def is_logged_in(self) -> bool:
         """Verificare in doua trepte: API-ul users/me (stabil, fara navigare),
         apoi fallback pe pagina /myaccount/ (vezi session_check)."""
-        me = fetch_me(self._context)
+        me = fetch_me(self._page)
         if me is not None:
             self._refresh_marker_identity(me)
             return True
@@ -301,7 +301,7 @@ class BrowserClient:
             self._page.wait_for_timeout(4000)
         except Exception:
             pass
-        me = fetch_me(self._context)
+        me = fetch_me(self._page)
         if me is not None:
             self._refresh_marker_identity(me)
             return True

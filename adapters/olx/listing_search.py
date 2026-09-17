@@ -67,8 +67,13 @@ def parse_search_results(page) -> list[dict]:
     """Extrage anunturile din pagina de rezultate curent incarcata in `page`.
 
     Selectori confirmati practic (data-testid, stabili indiferent de
-    layout): l-card (cardul), ad-card-title, ad-price, location-date,
-    card-title-link (linkul catre pagina de detaliu).
+    layout): l-card (cardul), ad-price, location-date, card-title-link
+    (linkul catre pagina de detaliu). Titlul are DOUA forme, dupa pagina:
+    la cautare, cardul are un element separat ad-card-title; pe pagina
+    "anunturile mele" (profilul public al contului), NU exista ad-card-title
+    -- textul e direct pe link-ul card-title-link (si in aria-label-ul lui,
+    mai curat, fara nevoie de firstLine) -- verificat practic (extractia
+    anunturilor proprii intorcea lista goala pana la acest fallback).
     """
     raw = page.evaluate(
         """
@@ -89,9 +94,12 @@ def parse_search_results(page) -> list[dict]:
                 const locEl = card.querySelector('[data-testid="location-date"]');
                 const titleEl = card.querySelector('[data-testid="ad-card-title"]');
                 const href = titleLink ? titleLink.getAttribute('href') : null;
+                const title = firstLine(titleEl)
+                    || (titleLink ? titleLink.getAttribute('aria-label') : null)
+                    || firstLine(titleLink);
                 return {
                     id: card.id || null,
-                    title: firstLine(titleEl),
+                    title: title,
                     price_text: text(priceEl),
                     location_date: text(locEl),
                     url: href ? new URL(href, location.origin).toString().split('?')[0] : null,

@@ -42,30 +42,47 @@ def _access_token(context) -> str | None:
     return None
 
 
-def fetch_me(context) -> dict | None:
+def fetch_me(page) -> dict | None:
     """Datele contului logat ({name, email, ...}) sau None daca nu e logat.
 
     Nu navigheaza — sigur de apelat in timp ce userul scrie in pagina.
+
+    Cererea se face DIN pagina (page.evaluate + fetch), nu prin
+    context.request: verificat practic, CloudFront (WAF-ul OLX) blocheaza
+    cu 403 "Request blocked" cererile facute prin canalul de retea separat
+    al lui context.request — nu are amprenta unei cereri reale de browser.
+    Login-ul se confirma atunci doar prin fallback-ul DOM (mai lent, si
+    fara nume/email, pentru ca fetch_me() esueaza mereu tacut). Un fetch()
+    executat chiar in pagina trece prin acelasi stack ca orice cerere AJAX
+    a userului, deci nu mai e blocat.
     """
+    context = page.context
     token = _access_token(context)
     if not token:
         return None
     try:
-        resp = context.request.get(
-            ME_API,
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {token}",
-            },
-            timeout=15000,
+        result = page.evaluate(
+            """
+            async ({url, token}) => {
+                try {
+                    const resp = await fetch(url, {
+                        headers: { 'Accept': 'application/json', 'Authorization': 'Bearer ' + token },
+                        credentials: 'include',
+                    });
+                    if (!resp.ok) return null;
+                    return await resp.json();
+                } catch (e) {
+                    return null;
+                }
+            }
+            """,
+            {"url": ME_API, "token": token},
         )
-        if not resp.ok:
-            return None
-        data = resp.json().get("data") or {}
-        return data if data.get("id") else None
     except Exception as e:
         logger.debug("users/me a esuat: {}", e)
         return None
+    data = (result or {}).get("data") or {}
+    return data if data.get("id") else None
 
 
 def accept_cookies(page) -> None:

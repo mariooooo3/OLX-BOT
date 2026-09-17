@@ -81,7 +81,7 @@ def wait_for_login(context, page, timeout_s: int = 600) -> dict | None:
         try:
             if page.is_closed():
                 return None
-            me = fetch_me(context)
+            me = fetch_me(page)
             if me:
                 return me
             if login_form_on_screen(page):
@@ -91,7 +91,7 @@ def wait_for_login(context, page, timeout_s: int = 600) -> dict | None:
             if time.time() - last_dom_check > 30:
                 last_dom_check = time.time()
                 if dom_logged_in(page):
-                    return fetch_me(context) or {}
+                    return fetch_me(page) or {}
         except Exception:
             return None  # fereastra inchisa de user
     return None
@@ -192,7 +192,7 @@ def main() -> None:
         context.add_init_script(init_script_for(profile_dir))
         page = context.pages[0] if context.pages else context.new_page()
 
-        me = fetch_me(context)
+        me = fetch_me(page)
         if me:
             logger.info("Esti deja logat din sesiuni anterioare.")
         else:

@@ -1,7 +1,16 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
-import { Copy, Pencil, Plus, Trash2, Package as PackageIcon } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  Copy,
+  Pencil,
+  Plus,
+  Trash2,
+  Package as PackageIcon,
+  DownloadCloud,
+  Loader2,
+  RefreshCw,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell, PageHeader } from "@/components/app-shell";
@@ -28,12 +37,26 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
-import { copyProduct, deleteProduct, getProducts, type OlxAccount } from "@/lib/api";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  copyProduct,
+  deleteProduct,
+  getActiveListings,
+  getProducts,
+  saveProduct,
+  type OlxAccount,
+} from "@/lib/api";
 import { AccountBadge, accountBorderClass, scopeLabel } from "@/components/account-scope";
 import { SellerInfoCard } from "@/components/seller-info-card";
 import { ALL_ACCOUNTS, useAccountScope, useAccounts, findAccount } from "@/lib/accounts";
 import { accountDisplayName } from "@/components/account-menu";
-import type { Product } from "@/lib/types";
+import type { ActiveListing, Product } from "@/lib/types";
 import { formatPrice } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -58,6 +81,7 @@ function ProductsPage() {
   });
   const [pendingDelete, setPendingDelete] = useState<Product | null>(null);
   const [copySource, setCopySource] = useState<Product | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
   const scopeName = scopeLabel(scope, accounts);
 
   // produsul nou se creeaza pe contul din scope; pe "toate conturile" cade pe
@@ -82,6 +106,9 @@ function ProductsPage() {
         description="Catalogul folosit de bot pentru a răspunde la întrebări."
         actions={
           <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => setImportOpen(true)}>
+              <DownloadCloud className="mr-2 h-4 w-4" /> Importă din OLX
+            </Button>
             <Button asChild>
               <Link
                 to="/products/$productId"
@@ -242,6 +269,14 @@ function ProductsPage() {
         onClose={() => setCopySource(null)}
         onCopied={() => qc.invalidateQueries({ queryKey: ["products"] })}
       />
+
+      <ImportListingsDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        accounts={accounts}
+        defaultAccountId={scope === ALL_ACCOUNTS ? undefined : scope}
+        onImported={() => qc.invalidateQueries({ queryKey: ["products"] })}
+      />
     </AppShell>
   );
 }
@@ -335,4 +370,216 @@ function CopyProductDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+/**
+ * Import produse din anunturile ACTIVE ale unui cont OLX conectat.
+ *
+ * Nu se salveaza nimic automat: userul alege contul, apasa "Extrage",
+ * bifeaza ce vrea, apoi "Importa". Titlul si pretul se completeaza direct
+ * din anunt; restul (stare, garantie, TVA, FAQ) ramane de completat manual
+ * dupa, exact ca la un produs adaugat de mana — extractia nu poate ghici
+ * campurile alea.
+ */
+function ImportListingsDialog({
+  open,
+  onClose,
+  accounts,
+  defaultAccountId,
+  onImported,
+}: {
+  open: boolean;
+  onClose: () => void;
+  accounts: OlxAccount[];
+  defaultAccountId?: string;
+  onImported: () => void;
+}) {
+  const connected = accounts.filter((a) => a.connected);
+  const [accountId, setAccountId] = useState<string | undefined>(defaultAccountId);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  // `accounts` se incarca async (query separat) — la montarea paginii poate
+  // fi inca goala, deci alegerea implicita nu se poate face o singura data
+  // in useState (ar ramane goala pentru totdeauna). Recalculam de fiecare
+  // data cand dialogul se deschide sau lista de conturi conectate se
+  // schimba, dar NU stricam o alegere deja valida a userului.
+  const connectedIds = connected.map((a) => a.id).join(",");
+  useEffect(() => {
+    if (!open) return;
+    setAccountId((current) => {
+      if (current && connected.some((a) => a.id === current)) return current;
+      if (defaultAccountId && connected.some((a) => a.id === defaultAccountId)) {
+        return defaultAccountId;
+      }
+      return connected[0]?.id;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, connectedIds, defaultAccountId]);
+
+  const extract = useMutation({
+    mutationFn: (id: string) => getActiveListings(id),
+    onSuccess: (data) => {
+      // implicit toate bifate — cazul comun e sa le vrei pe toate
+      setSelected(new Set(data.listings.map((l) => l.url)));
+      if (data.listings.length === 0) {
+        toast.info("Niciun anunț activ găsit pe acest cont.");
+      }
+    },
+    onError: (e) =>
+      toast.error(e instanceof Error ? e.message : "Nu am putut extrage anunțurile"),
+  });
+
+  const toggle = (url: string) =>
+    setSelected((cur) => {
+      const next = new Set(cur);
+      if (next.has(url)) next.delete(url);
+      else next.add(url);
+      return next;
+    });
+
+  const importSelected = useMutation({
+    mutationFn: async () => {
+      const items = (extract.data?.listings ?? []).filter((l) => selected.has(l.url));
+      let count = 0;
+      for (const item of items) {
+        await saveProduct(productFromListing(item), accountId);
+        count += 1;
+      }
+      return count;
+    },
+    onSuccess: (count) => {
+      onImported();
+      toast.success(count === 1 ? "1 produs importat" : `${count} produse importate`);
+      handleClose();
+    },
+    onError: (e) =>
+      toast.error(e instanceof Error ? e.message : "Importul a eșuat la un produs"),
+  });
+
+  function handleClose() {
+    setSelected(new Set());
+    extract.reset();
+    onClose();
+  }
+
+  const listings = extract.data?.listings ?? [];
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && handleClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Importă din OLX</DialogTitle>
+          <DialogDescription>
+            Extrage anunțurile active ale unui cont conectat și alege ce adaugi în catalog. Titlul
+            și prețul se completează automat — restul (stare, garanție, FAQ) rămâne de completat
+            manual, ca la orice produs adăugat direct.
+          </DialogDescription>
+        </DialogHeader>
+
+        {connected.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            Niciun cont conectat momentan — conectează unul din panoul de conturi.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Select
+                value={accountId}
+                onValueChange={(value) => {
+                  setAccountId(value);
+                  extract.reset();
+                  setSelected(new Set());
+                }}
+              >
+                <SelectTrigger className="flex-1">
+                  <SelectValue placeholder="Alege contul" />
+                </SelectTrigger>
+                <SelectContent>
+                  {connected.map((a) => (
+                    <SelectItem key={a.id} value={a.id}>
+                      {accountDisplayName(a)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                variant="outline"
+                disabled={!accountId || extract.isPending}
+                onClick={() => accountId && extract.mutate(accountId)}
+              >
+                {extract.isPending ? (
+                  <Loader2 className="mr-1.5 h-4 w-4 animate-spin" strokeWidth={1.5} />
+                ) : (
+                  <RefreshCw className="mr-1.5 h-4 w-4" strokeWidth={1.5} />
+                )}
+                Extrage
+              </Button>
+            </div>
+
+            {extract.isPending ? (
+              <p className="text-xs text-muted-foreground">
+                Citesc anunțurile active de pe OLX — poate dura până la un minut.
+              </p>
+            ) : listings.length > 0 ? (
+              <ul className="max-h-72 space-y-1.5 overflow-y-auto">
+                {listings.map((item) => (
+                  <li key={item.url}>
+                    <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-border/70 bg-muted/30 px-2.5 py-2 text-xs transition-colors hover:bg-muted/50">
+                      <Checkbox
+                        className="mt-0.5"
+                        checked={selected.has(item.url)}
+                        onCheckedChange={() => toggle(item.url)}
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-medium">{item.title}</span>
+                        <span className="text-muted-foreground">
+                          {item.price !== null && item.currency
+                            ? formatPrice(item.price, item.currency)
+                            : (item.price_text ?? "preț nespecificat")}
+                        </span>
+                      </span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="ghost" onClick={handleClose}>
+            Renunță
+          </Button>
+          <Button
+            disabled={selected.size === 0 || importSelected.isPending}
+            onClick={() => importSelected.mutate()}
+          >
+            {importSelected.isPending ? (
+              <Loader2 className="mr-1.5 h-4 w-4 animate-spin" strokeWidth={1.5} />
+            ) : null}
+            Importă{selected.size > 0 ? ` (${selected.size})` : ""}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Produsul nou, cu campurile stiute din anunt; restul ia valorile implicite
+ *  (identice cu core/product_schema.py:empty_product(), ca sa nu difere de
+ *  ce ai obtine adaugand manual acelasi produs). */
+function productFromListing(item: ActiveListing): Product {
+  return {
+    id: "",
+    title: item.title,
+    price: item.price ?? 0,
+    currency: item.currency ?? "RON",
+    stock: 1,
+    condition: "folosit",
+    negotiable: false,
+    warranty: "",
+    vat: { included: true, deductible: false, rate: 21 },
+    about: `Importat de pe OLX: ${item.url}`,
+    faq: [],
+  };
 }

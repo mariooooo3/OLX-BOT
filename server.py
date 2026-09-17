@@ -33,6 +33,7 @@ from playwright.sync_api import sync_playwright
 import config
 from adapters.olx.browser_client import install_playwright_browsers
 from adapters.olx.listing_search import fetch_seller_name, parse_search_results, search_url
+from adapters.olx.session_check import fetch_me
 from core.accounts import (
     ACCOUNTS_PATH,
     DEFAULT_SETTINGS,
@@ -580,9 +581,12 @@ def search_listings(q: str, limit: int = 20):
     """Cauta pe OLX.ro anunturi al caror titlu contine `q`, excluzand
     anunturile care par sa fie ale conturilor tale conectate.
 
-    Excluderea se face dupa numele public de vanzator (afisat pe pagina de
-    detaliu a fiecarui anunt), comparat cu numele deja cunoscute ale
-    conturilor tale (salvate local la login — vezi core/accounts.py).
+    Excluderea e precisa: compara perechea (nume vanzator, titlu anunt) cu
+    ultima extractie salvata pentru fiecare cont conectat (vezi
+    /api/olx/accounts/{id}/active-listings si _own_listing_signals()) — nu
+    doar numele, ca un alt vanzator cu acelasi nume dar alt produs sa nu
+    ajunga exclus din greseala. Pentru conturile fara nicio extractie inca,
+    ramane fallback-ul mai larg, dupa nume (vezi _own_listing_signals()).
 
     Public, fara nicio sesiune OLX — nu foloseste profilul/proxy-ul vreunui
     cont. `limit` plafoneaza cate anunturi verificam individual (o pagina de
@@ -594,13 +598,7 @@ def search_listings(q: str, limit: int = 20):
         raise HTTPException(status_code=422, detail="Introdu un titlu de cautat.")
     limit = max(1, min(limit, 51))
 
-    own_names = {
-        name.strip().lower()
-        for account in load_accounts()["accounts"]
-        if account_connected(account)
-        for name in [read_marker(account).get("name")]
-        if name
-    }
+    own_pairs, own_fallback_names = _own_listing_signals()
 
     with sync_playwright() as p:
         try:
@@ -626,7 +624,12 @@ def search_listings(q: str, limit: int = 20):
             excluded_own = 0
             for item in candidates:
                 seller = fetch_seller_name(page, item["url"])
-                if seller and seller.strip().lower() in own_names:
+                seller_norm = seller.strip().lower() if seller else None
+                is_own = seller_norm is not None and (
+                    (seller_norm, item["title"].strip().lower()) in own_pairs
+                    or seller_norm in own_fallback_names
+                )
+                if is_own:
                     excluded_own += 1
                     continue
                 listings.append({**item, "seller_name": seller})
@@ -637,6 +640,158 @@ def search_listings(q: str, limit: int = 20):
         "query": query,
         "checked": len(candidates),
         "excluded_own": excluded_own,
+        "listings": listings,
+    }
+
+
+# --------------------------------------------------------------------- #
+# import produse din anunturile ACTIVE ale unui cont OLX
+# --------------------------------------------------------------------- #
+
+MAX_OWN_LISTING_PAGES = 20  # plasa de siguranta — un cont normal are mult sub atat
+
+
+def _own_listings_cache_path(account_id: str) -> Path:
+    return account_data_dir(account_id) / "own_listings_cache.json"
+
+
+def _save_own_listings_cache(account_id: str, seller_name: str | None, listings: list[dict]) -> None:
+    """Salveaza local (nume public vanzator + titlurile anunturilor active
+    ale contului) dupa fiecare extractie — folosit de search_listings() ca
+    sa excluda precis anunturile proprii din alte cautari, dupa perechea
+    (vanzator, titlu), nu doar dupa nume (vezi _own_listing_signals())."""
+    path = _own_listings_cache_path(account_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "seller_name": seller_name,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "titles": [item["title"] for item in listings if item.get("title")],
+    }
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _own_listing_signals() -> tuple[set[tuple[str, str]], set[str]]:
+    """Semnalele "e al meu" pentru search_listings(), din toate conturile
+    conectate:
+
+      - `pairs`: (nume vanzator, titlu) EXACTE, din ultima extractie salvata
+        de get_active_listings() pentru contul respectiv — precis, nu
+        exclude din greseala anuntul altcuiva cu acelasi nume dar alt titlu.
+      - `fallback_names`: doar numele conturilor care NU au inca nicio
+        extractie salvata — plasa de siguranta, ca un cont proaspat conectat
+        (fara "Importă din OLX" rulat macar o data) sa nu ramana complet
+        neexclus din propriile cautari.
+    """
+    pairs: set[tuple[str, str]] = set()
+    fallback_names: set[str] = set()
+    for account in load_accounts()["accounts"]:
+        if not account_connected(account):
+            continue
+        cache_path = _own_listings_cache_path(account["id"])
+        cached = None
+        if cache_path.exists():
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                cached = None
+        seller_name = (cached or {}).get("seller_name") or read_marker(account).get("name")
+        if not seller_name:
+            continue
+        seller_name = seller_name.strip().lower()
+        titles = (cached or {}).get("titles") or []
+        if titles:
+            for title in titles:
+                pairs.add((seller_name, str(title).strip().lower()))
+        else:
+            fallback_names.add(seller_name)
+    return pairs, fallback_names
+
+
+@app.get("/api/olx/accounts/{account_id}/active-listings")
+def get_active_listings(account_id: str):
+    """Extrage anunturile ACTIVE ale contului, direct de pe profilul lui
+    public OLX (`user_ads_url` din users/me — aceleasi carduri/selectori ca
+    la cautare, vezi adapters/olx/listing_search.py).
+
+    NU creeaza produse — doar le intoarce, ca userul sa aleaga din dashboard
+    ce importa (creare efectiva prin POST /api/products, ca la orice produs
+    adaugat manual).
+    """
+    account = _account_or_404(account_id)
+    if not account_connected(account):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Contul „{account_display_name(account)}” nu e conectat.",
+        )
+
+    from adapters.olx.browser_client import BrowserClient, LoginRequiredError
+
+    # profilul de browser nu poate fi deschis de doua procese deodata — daca
+    # botul acestui cont ruleaza ca thread, il oprim intai (la fel ca la
+    # deschiderea ferestrei de login, vezi olx_login_account)
+    fleet.stop_account(account_id, wait=True)
+
+    browser = BrowserClient(
+        profile_dir=account_profile_dir(account),
+        proxy=account_proxy(account),
+        headless=True,
+    )
+    try:
+        browser.start()
+    except LoginRequiredError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    try:
+        page = browser._page
+        me = fetch_me(page)
+        ads_url = (me or {}).get("user_ads_url")
+        if not ads_url:
+            raise HTTPException(
+                status_code=502,
+                detail="Nu am putut afla adresa anunțurilor tale de pe OLX.",
+            )
+
+        listings: list[dict] = []
+        seen_urls: set[str] = set()
+        page_number = 1
+        while page_number <= MAX_OWN_LISTING_PAGES:
+            url = ads_url if page_number == 1 else f"{ads_url.rstrip('/')}/?page={page_number}"
+            try:
+                # "domcontentloaded" nu ajunge -- cardurile se randeaza
+                # client-side dupa hidratare (verificat practic: fara asta,
+                # parse_search_results rula prea devreme si intorcea gol).
+                # "networkidle" nu merge nici el -- pagina asta nu se
+                # liniisteste niciodata complet (polling de fundal), timeout
+                # garantat; asteptam punctual chiar elementul de care avem
+                # nevoie, nu toata reteaua.
+                page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_selector('[data-testid="l-card"]', timeout=8000)
+            except Exception as e:
+                logger.debug(
+                    "Pagina {} a anunturilor proprii: niciun anunt gasit ({}).",
+                    page_number, e,
+                )
+                break
+            batch = [item for item in parse_search_results(page) if item["url"] not in seen_urls]
+            if not batch:
+                break
+            for item in batch:
+                seen_urls.add(item["url"])
+            listings.extend(batch)
+            page_number += 1
+
+        # salvat DUPA ce lista e completa (nu la fiecare pagina) — vezi
+        # _own_listing_signals(): search_listings() foloseste cache-ul asta
+        # ca sa excluda precis anunturile proprii din alte cautari
+        _save_own_listings_cache(account_id, (me or {}).get("name"), listings)
+    finally:
+        browser.stop()
+
+    return {
+        "account_id": account_id,
+        "account_label": account_display_name(account),
         "listings": listings,
     }
 

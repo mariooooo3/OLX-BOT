@@ -13,6 +13,7 @@ import type {
   ProxyFullTestResult,
   ProxyTestResult,
   ListingSearchResponse,
+  ActiveListingsResponse,
 } from "./types";
 
 // Backend-ul FastAPI al botului (server.py). Configurabil prin VITE_API_URL.
@@ -113,6 +114,18 @@ export async function searchListings(
 ): Promise<ListingSearchResponse> {
   return request<ListingSearchResponse>(
     `/api/listing-search?q=${encodeURIComponent(query)}&limit=${limit}`,
+  );
+}
+
+/**
+ * Extrage anunturile ACTIVE ale unui cont, direct de pe profilul lui public
+ * OLX (vezi server.py:get_active_listings) — nu creeaza produse, doar le
+ * intoarce ca sa alegi ce imporți (creare efectiva prin saveProduct()).
+ * Contul trebuie sa fie conectat; poate dura cateva zeci de secunde.
+ */
+export async function getActiveListings(accountId: string): Promise<ActiveListingsResponse> {
+  return request<ActiveListingsResponse>(
+    `/api/olx/accounts/${encodeURIComponent(accountId)}/active-listings`,
   );
 }
 

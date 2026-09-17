@@ -284,6 +284,23 @@ export interface ListingSearchResponse {
   listings: ListingSearchResult[];
 }
 
+/** Un anunt ACTIV extras de pe profilul public al contului (import produse). */
+export interface ActiveListing {
+  id: string | null;
+  title: string;
+  price_text: string | null;
+  price: number | null;
+  currency: string | null;
+  location_date: string | null;
+  url: string;
+}
+
+export interface ActiveListingsResponse {
+  account_id: string;
+  account_label: string;
+  listings: ActiveListing[];
+}
+
 /** Rezultatul unui test de conectivitate prin proxy (catre OLX). */
 export interface ProxyTestResult {
   ok: boolean;
